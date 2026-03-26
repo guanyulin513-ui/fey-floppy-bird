@@ -1,0 +1,40 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #5dade2;
+  font-family: Arial, Helvetica, sans-serif;
+  touch-action: manipulation;
+}
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#game-shell {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(circle at 20% 20%, rgba(255,255,255,0.18), transparent 25%),
+    linear-gradient(to bottom, #85c1e9 0%, #5dade2 100%);
+}
+
+canvas {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  background: transparent;
+}
