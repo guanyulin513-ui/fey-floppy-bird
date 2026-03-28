@@ -43,10 +43,9 @@
     groundHeight: 0.35,
     birdXRatio: 0.30,
 
-    // 更接近原版手感：更強重力、更有力的瞬間上衝、更快下墜
-    gravity: 6.2,        // cm/s^2
-    jumpImpulse: -1.78,  // cm/s
-    maxFallSpeed: 3.35,  // cm/s
+    gravity: 6.2,
+    jumpImpulse: -1.78,
+    maxFallSpeed: 3.35,
 
     minPipeSpacing: 0.9,
     midPipeSpacing: 1.9,
@@ -73,10 +72,8 @@
   let clouds = [];
   let groundOffsetPx = 0;
 
-  let deathFrozen = false;
   let birdLandedAfterDeath = false;
 
-  // Audio
   let audioContext = null;
   let masterGain = null;
   let bgmStarted = false;
@@ -114,7 +111,6 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     scale = height / 3;
-
     initializeGameObjects();
   }
 
@@ -128,7 +124,6 @@
     groundOffsetPx = 0;
     score = 0;
     elapsedGameTime = 0;
-    deathFrozen = false;
     birdLandedAfterDeath = false;
     highScore = previousHighScore;
     state = previousState === "gameover" ? "ready" : previousState;
@@ -143,7 +138,6 @@
     score = 0;
     elapsedGameTime = 0;
     groundOffsetPx = 0;
-    deathFrozen = false;
     birdLandedAfterDeath = false;
     createInitialPipes();
   }
@@ -258,6 +252,97 @@
     }
   }
 
+  function resolveDeathSolidCollision(prevY) {
+    const birdHalf = bird.size / 2;
+    const birdLeft = bird.x - birdHalf;
+    const birdRight = bird.x + birdHalf;
+    const birdTop = bird.y - birdHalf;
+    const birdBottom = bird.y + birdHalf;
+    const prevTop = prevY - birdHalf;
+    const prevBottom = prevY + birdHalf;
+    const groundTop = height - cmToPx(CM.groundHeight);
+
+    let landed = false;
+
+    if (birdBottom >= groundTop) {
+      bird.y = groundTop - birdHalf;
+      bird.velocityY = 0;
+      bird.angle = 1.55;
+      birdLandedAfterDeath = true;
+      return;
+    }
+
+    for (const pipe of pipes) {
+      const pipeLeft = pipe.x;
+      const pipeRight = pipe.x + pipe.width;
+
+      if (birdRight <= pipeLeft || birdLeft >= pipeRight) {
+        continue;
+      }
+
+      const topPipeBottom = pipe.gapTop;
+      const bottomPipeTop = pipe.gapTop + pipe.gapHeight;
+
+      const overlapsTopPipe = birdTop < topPipeBottom;
+      const overlapsBottomPipe = birdBottom > bottomPipeTop;
+
+      if (!overlapsTopPipe && !overlapsBottomPipe) {
+        continue;
+      }
+
+      // 掉到下方水管上表面 → 停在水管上
+      if (
+        bird.velocityY >= 0 &&
+        prevBottom <= bottomPipeTop &&
+        birdBottom >= bottomPipeTop
+      ) {
+        bird.y = bottomPipeTop - birdHalf;
+        bird.velocityY = 0;
+        bird.angle = 1.55;
+        birdLandedAfterDeath = true;
+        landed = true;
+        break;
+      }
+
+      // 若死亡時卡在上方水管內部，不讓再穿過上方水管底面
+      if (
+        bird.velocityY <= 0 &&
+        prevTop >= topPipeBottom &&
+        birdTop <= topPipeBottom
+      ) {
+        bird.y = topPipeBottom + birdHalf;
+        bird.velocityY = 0;
+        bird.angle = 1.55;
+        birdLandedAfterDeath = true;
+        landed = true;
+        break;
+      }
+
+      // 已經在水管內時，推到最近的外側，避免穿模
+      if (overlapsTopPipe) {
+        bird.y = topPipeBottom + birdHalf;
+        bird.velocityY = 0;
+        bird.angle = 1.55;
+        birdLandedAfterDeath = true;
+        landed = true;
+        break;
+      }
+
+      if (overlapsBottomPipe) {
+        bird.y = bottomPipeTop - birdHalf;
+        bird.velocityY = 0;
+        bird.angle = 1.55;
+        birdLandedAfterDeath = true;
+        landed = true;
+        break;
+      }
+    }
+
+    if (landed) {
+      return;
+    }
+  }
+
   function updateBird(dt) {
     const groundTop = height - cmToPx(CM.groundHeight);
     const gravityPx = cmToPx(CM.gravity);
@@ -284,22 +369,23 @@
     if (state === "gameover") {
       if (birdLandedAfterDeath) {
         bird.velocityY = 0;
-        bird.y = groundTop - bird.size / 2;
         bird.angle = 1.55;
+
+        if (bird.y + bird.size / 2 >= groundTop) {
+          bird.y = groundTop - bird.size / 2;
+        }
+
         return;
       }
+
+      const prevY = bird.y;
 
       bird.velocityY += gravityPx * dt;
       bird.velocityY = Math.min(bird.velocityY, maxFallSpeedPx);
       bird.y += bird.velocityY * dt;
       bird.angle = lerp(bird.angle, 1.55, 0.18);
 
-      if (bird.y + bird.size / 2 >= groundTop) {
-        bird.y = groundTop - bird.size / 2;
-        bird.velocityY = 0;
-        bird.angle = 1.55;
-        birdLandedAfterDeath = true;
-      }
+      resolveDeathSolidCollision(prevY);
     }
   }
 
@@ -391,9 +477,7 @@
     if (state === "gameover") return;
 
     state = "gameover";
-    deathFrozen = true;
     birdLandedAfterDeath = false;
-
     bird.velocityY = Math.max(bird.velocityY, cmToPx(0.8));
     playGameOverSound();
   }
