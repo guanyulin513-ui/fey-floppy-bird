@@ -174,12 +174,9 @@
   }
 
   function createInitialPipes() {
-    let x = width + cmToPx(0.8);
-    for (let i = 0; i < 4; i++) {
-      const pipe = createPipe(x);
-      pipes.push(pipe);
-      x += cmToPx(getPipeSpacingCm(score)) + cmToPx(CM.pipeWidth);
-    }
+    const firstX = width + cmToPx(0.8);
+    pipes.push(createPipe(firstX));
+    ensurePipesFilled();
   }
 
   function getPipeSpacingCm(currentScore) {
@@ -219,6 +216,22 @@
       gapHeight,
       scored: false
     };
+  }
+
+  function ensurePipesFilled() {
+    const pipeWidthPx = cmToPx(CM.pipeWidth);
+    const spacingPx = cmToPx(getPipeSpacingCm(score));
+    const minRightEdge = width + spacingPx + pipeWidthPx;
+
+    if (pipes.length === 0) {
+      pipes.push(createPipe(width + cmToPx(0.8)));
+    }
+
+    while (pipes.length < 4 || pipes[pipes.length - 1].x < minRightEdge) {
+      const lastPipe = pipes[pipes.length - 1];
+      const nextX = lastPipe.x + pipeWidthPx + spacingPx;
+      pipes.push(createPipe(nextX));
+    }
   }
 
   function startPlayingIfNeeded() {
@@ -262,14 +275,12 @@
     const prevBottom = prevY + birdHalf;
     const groundTop = height - cmToPx(CM.groundHeight);
 
-    let landed = false;
-
     if (birdBottom >= groundTop) {
       bird.y = groundTop - birdHalf;
       bird.velocityY = 0;
       bird.angle = 1.55;
       birdLandedAfterDeath = true;
-      return;
+      return true;
     }
 
     for (const pipe of pipes) {
@@ -283,64 +294,46 @@
       const topPipeBottom = pipe.gapTop;
       const bottomPipeTop = pipe.gapTop + pipe.gapHeight;
 
-      const overlapsTopPipe = birdTop < topPipeBottom;
-      const overlapsBottomPipe = birdBottom > bottomPipeTop;
-
-      if (!overlapsTopPipe && !overlapsBottomPipe) {
-        continue;
-      }
-
-      // 掉到下方水管上表面 → 停在水管上
-      if (
-        bird.velocityY >= 0 &&
-        prevBottom <= bottomPipeTop &&
-        birdBottom >= bottomPipeTop
-      ) {
+      // 落到下方水管上表面
+      if (prevBottom <= bottomPipeTop && birdBottom >= bottomPipeTop) {
         bird.y = bottomPipeTop - birdHalf;
         bird.velocityY = 0;
         bird.angle = 1.55;
         birdLandedAfterDeath = true;
-        landed = true;
-        break;
+        return true;
       }
 
-      // 若死亡時卡在上方水管內部，不讓再穿過上方水管底面
-      if (
-        bird.velocityY <= 0 &&
-        prevTop >= topPipeBottom &&
-        birdTop <= topPipeBottom
-      ) {
+      // 若原本就卡進下方水管，也直接推出去
+      if (birdBottom > bottomPipeTop && birdTop < height) {
+        if (bird.y >= bottomPipeTop - birdHalf) {
+          bird.y = bottomPipeTop - birdHalf;
+          bird.velocityY = 0;
+          bird.angle = 1.55;
+          birdLandedAfterDeath = true;
+          return true;
+        }
+      }
+
+      // 若死亡瞬間在上方水管內或靠其底面，也不可往下穿出
+      if (birdTop < topPipeBottom) {
         bird.y = topPipeBottom + birdHalf;
         bird.velocityY = 0;
         bird.angle = 1.55;
         birdLandedAfterDeath = true;
-        landed = true;
-        break;
+        return true;
       }
 
-      // 已經在水管內時，推到最近的外側，避免穿模
-      if (overlapsTopPipe) {
-        bird.y = topPipeBottom + birdHalf;
-        bird.velocityY = 0;
-        bird.angle = 1.55;
-        birdLandedAfterDeath = true;
-        landed = true;
-        break;
-      }
-
-      if (overlapsBottomPipe) {
+      // 補強：若剛好從 gap 中掉進下方水管
+      if (prevBottom <= bottomPipeTop && birdBottom > bottomPipeTop) {
         bird.y = bottomPipeTop - birdHalf;
         bird.velocityY = 0;
         bird.angle = 1.55;
         birdLandedAfterDeath = true;
-        landed = true;
-        break;
+        return true;
       }
     }
 
-    if (landed) {
-      return;
-    }
+    return false;
   }
 
   function updateBird(dt) {
@@ -374,7 +367,6 @@
         if (bird.y + bird.size / 2 >= groundTop) {
           bird.y = groundTop - bird.size / 2;
         }
-
         return;
       }
 
@@ -406,8 +398,6 @@
     if (state !== "playing") return;
 
     const moveX = sceneSpeedPxPerSec * dt;
-    const pipeSpacingPx = cmToPx(getPipeSpacingCm(score));
-    const pipeWidthPx = cmToPx(CM.pipeWidth);
 
     for (const pipe of pipes) {
       pipe.x -= moveX;
@@ -427,12 +417,7 @@
       pipes.shift();
     }
 
-    if (pipes.length) {
-      const lastPipe = pipes[pipes.length - 1];
-      if (lastPipe.x <= width - pipeSpacingPx) {
-        pipes.push(createPipe(lastPipe.x + pipeSpacingPx + pipeWidthPx));
-      }
-    }
+    ensurePipesFilled();
   }
 
   function checkCollisions() {
