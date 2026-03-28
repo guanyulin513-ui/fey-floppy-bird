@@ -27,7 +27,11 @@
 
     text: "#FFFFFF",
     textShadow: "rgba(0,0,0,0.35)",
-    overlay: "rgba(0,0,0,0.35)"
+    overlay: "rgba(0,0,0,0.35)",
+
+    buttonBg: "rgba(255,255,255,0.18)",
+    buttonBorder: "rgba(255,255,255,0.42)",
+    buttonOff: "rgba(255,120,120,0.85)"
   };
 
   const CM = {
@@ -71,8 +75,11 @@
   let pipes = [];
   let clouds = [];
   let groundOffsetPx = 0;
+  let dirtParticles = [];
 
-  let birdLandedAfterDeath = false;
+  let birdSettledAfterDeath = false;
+  let deathPose = "none"; // none | bounce | embed | pipe
+  let soundEnabled = true;
 
   let audioContext = null;
   let masterGain = null;
@@ -95,6 +102,10 @@
   function smoothstep01(t) {
     t = clamp(t, 0, 1);
     return t * t * (3 - 2 * t);
+  }
+
+  function rand(min, max) {
+    return min + Math.random() * (max - min);
   }
 
   function resize() {
@@ -121,10 +132,12 @@
     bird = createBird();
     pipes = [];
     clouds = createClouds();
+    dirtParticles = [];
     groundOffsetPx = 0;
     score = 0;
     elapsedGameTime = 0;
-    birdLandedAfterDeath = false;
+    birdSettledAfterDeath = false;
+    deathPose = "none";
     highScore = previousHighScore;
     state = previousState === "gameover" ? "ready" : previousState;
 
@@ -135,10 +148,12 @@
     state = "ready";
     bird = createBird();
     pipes = [];
+    dirtParticles = [];
     score = 0;
     elapsedGameTime = 0;
     groundOffsetPx = 0;
-    birdLandedAfterDeath = false;
+    birdSettledAfterDeath = false;
+    deathPose = "none";
     createInitialPipes();
   }
 
@@ -153,7 +168,8 @@
       size,
       wingTimer: 0,
       angle: -0.08,
-      velocityY: 0
+      velocityY: 0,
+      embedDepth: 0
     };
   }
 
@@ -247,6 +263,35 @@
     playFlapSound();
   }
 
+  function getSoundButtonRect() {
+    const size = Math.max(42, Math.min(56, Math.floor(height * 0.07)));
+    const margin = Math.max(12, Math.floor(height * 0.02));
+    return {
+      x: width - margin - size,
+      y: margin,
+      w: size,
+      h: size
+    };
+  }
+
+  function pointInRect(px, py, rect) {
+    return px >= rect.x && px <= rect.x + rect.w && py >= rect.y && py <= rect.y + rect.h;
+  }
+
+  function getPointerPos(event) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top
+    };
+  }
+
+  function toggleSound() {
+    soundEnabled = !soundEnabled;
+    ensureAudio();
+    updateMasterGain();
+  }
+
   function triggerAction() {
     ensureAudio();
 
@@ -265,75 +310,56 @@
     }
   }
 
-  function resolveDeathSolidCollision(prevY) {
-    const birdHalf = bird.size / 2;
-    const birdLeft = bird.x - birdHalf;
-    const birdRight = bird.x + birdHalf;
-    const birdTop = bird.y - birdHalf;
-    const birdBottom = bird.y + birdHalf;
-    const prevTop = prevY - birdHalf;
-    const prevBottom = prevY + birdHalf;
-    const groundTop = height - cmToPx(CM.groundHeight);
+  function getBirdBoxAt(x, y) {
+    const half = bird.size / 2;
+    return {
+      left: x - half,
+      right: x + half,
+      top: y - half,
+      bottom: y + half
+    };
+  }
 
-    if (birdBottom >= groundTop) {
-      bird.y = groundTop - birdHalf;
-      bird.velocityY = 0;
-      bird.angle = 1.55;
-      birdLandedAfterDeath = true;
-      return true;
+  function spawnDirtBurst(x, y, strength, embed = false) {
+    const count = embed ? 18 : 12;
+    const baseSpeed = embed ? 1.0 : 0.75;
+
+    for (let i = 0; i < count; i++) {
+      const angle = rand(-Math.PI * 0.92, -Math.PI * 0.08);
+      const speed = cmToPx(baseSpeed * rand(0.35, 0.95) * Math.max(0.65, strength));
+      dirtParticles.push({
+        x,
+        y,
+        vx: Math.cos(angle) * speed * rand(0.65, 1.15),
+        vy: Math.sin(angle) * speed * rand(0.65, 1.15),
+        life: rand(0.28, 0.48),
+        maxLife: rand(0.28, 0.48),
+        size: rand(cmToPx(0.012), cmToPx(0.03)),
+        color: Math.random() < 0.5 ? COLORS.groundSoil : COLORS.groundShadow
+      });
     }
+  }
 
-    for (const pipe of pipes) {
-      const pipeLeft = pipe.x;
-      const pipeRight = pipe.x + pipe.width;
-
-      if (birdRight <= pipeLeft || birdLeft >= pipeRight) {
+  function updateParticles(dt) {
+    for (let i = dirtParticles.length - 1; i >= 0; i--) {
+      const p = dirtParticles[i];
+      p.life -= dt;
+      if (p.life <= 0) {
+        dirtParticles.splice(i, 1);
         continue;
       }
 
-      const topPipeBottom = pipe.gapTop;
-      const bottomPipeTop = pipe.gapTop + pipe.gapHeight;
+      p.vy += cmToPx(4.8) * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
 
-      // 落到下方水管上表面
-      if (prevBottom <= bottomPipeTop && birdBottom >= bottomPipeTop) {
-        bird.y = bottomPipeTop - birdHalf;
-        bird.velocityY = 0;
-        bird.angle = 1.55;
-        birdLandedAfterDeath = true;
-        return true;
-      }
-
-      // 若原本就卡進下方水管，也直接推出去
-      if (birdBottom > bottomPipeTop && birdTop < height) {
-        if (bird.y >= bottomPipeTop - birdHalf) {
-          bird.y = bottomPipeTop - birdHalf;
-          bird.velocityY = 0;
-          bird.angle = 1.55;
-          birdLandedAfterDeath = true;
-          return true;
-        }
-      }
-
-      // 若死亡瞬間在上方水管內或靠其底面，也不可往下穿出
-      if (birdTop < topPipeBottom) {
-        bird.y = topPipeBottom + birdHalf;
-        bird.velocityY = 0;
-        bird.angle = 1.55;
-        birdLandedAfterDeath = true;
-        return true;
-      }
-
-      // 補強：若剛好從 gap 中掉進下方水管
-      if (prevBottom <= bottomPipeTop && birdBottom > bottomPipeTop) {
-        bird.y = bottomPipeTop - birdHalf;
-        bird.velocityY = 0;
-        bird.angle = 1.55;
-        birdLandedAfterDeath = true;
-        return true;
+      const groundTop = height - cmToPx(CM.groundHeight);
+      if (p.y >= groundTop - p.size) {
+        p.y = groundTop - p.size;
+        p.vx *= 0.72;
+        p.vy *= -0.18;
       }
     }
-
-    return false;
   }
 
   function updateBird(dt) {
@@ -344,12 +370,14 @@
     if (state === "ready") {
       bird.wingTimer += dt;
       bird.angle = -0.08;
+      bird.embedDepth = 0;
       bird.y += Math.sin(performance.now() * 0.004) * 0.12;
       return;
     }
 
     if (state === "playing") {
       bird.wingTimer += dt;
+      bird.embedDepth = 0;
       bird.velocityY += gravityPx * dt;
       bird.velocityY = Math.min(bird.velocityY, maxFallSpeedPx);
       bird.y += bird.velocityY * dt;
@@ -360,25 +388,186 @@
     }
 
     if (state === "gameover") {
-      if (birdLandedAfterDeath) {
+      if (birdSettledAfterDeath) {
         bird.velocityY = 0;
-        bird.angle = 1.55;
-
-        if (bird.y + bird.size / 2 >= groundTop) {
-          bird.y = groundTop - bird.size / 2;
+        if (deathPose === "embed") {
+          bird.angle = lerp(bird.angle, 1.35, 0.18);
+        } else if (deathPose === "pipe") {
+          bird.angle = lerp(bird.angle, 1.25, 0.18);
+        } else {
+          bird.angle = lerp(bird.angle, 1.0, 0.18);
         }
         return;
       }
 
-      const prevY = bird.y;
+      bird.wingTimer += dt * 0.25;
 
+      const prevX = bird.x;
+      const prevY = bird.y;
       bird.velocityY += gravityPx * dt;
       bird.velocityY = Math.min(bird.velocityY, maxFallSpeedPx);
       bird.y += bird.velocityY * dt;
-      bird.angle = lerp(bird.angle, 1.55, 0.18);
+      bird.angle = lerp(bird.angle, 1.45, 0.14);
 
-      resolveDeathSolidCollision(prevY);
+      resolveDeathCollision(prevX, prevY, groundTop);
     }
+  }
+
+  function resolveDeathCollision(prevX, prevY, groundTop) {
+    const prevBox = getBirdBoxAt(prevX, prevY);
+    const box = getBirdBoxAt(bird.x, bird.y);
+
+    if (box.bottom >= groundTop) {
+      resolveGroundImpact(prevBox, box, groundTop);
+      return true;
+    }
+
+    for (const pipe of pipes) {
+      const topRect = {
+        left: pipe.x,
+        right: pipe.x + pipe.width,
+        top: 0,
+        bottom: pipe.gapTop
+      };
+
+      const bottomRect = {
+        left: pipe.x,
+        right: pipe.x + pipe.width,
+        top: pipe.gapTop + pipe.gapHeight,
+        bottom: groundTop
+      };
+
+      if (resolvePipeRectCollision(prevBox, box, topRect)) return true;
+      if (resolvePipeRectCollision(prevBox, box, bottomRect)) return true;
+    }
+
+    return false;
+  }
+
+  function resolveGroundImpact(prevBox, box, groundTop) {
+    const speedCm = Math.abs(bird.velocityY) / scale;
+    const downwardFacing = bird.angle > 1.02;
+    const hardImpact = speedCm > 1.35;
+    const embed = downwardFacing && hardImpact;
+
+    if (embed) {
+      const embedDepth = clamp(cmToPx(0.025 + speedCm * 0.012), cmToPx(0.01), cmToPx(0.055));
+      bird.embedDepth = embedDepth;
+      bird.y = groundTop - bird.size / 2 + embedDepth;
+      bird.velocityY = 0;
+      bird.angle = Math.max(bird.angle, 1.22);
+      birdSettledAfterDeath = true;
+      deathPose = "embed";
+      spawnDirtBurst(bird.x + bird.size * 0.18, groundTop, Math.min(1.45, speedCm), true);
+      playGroundThudSound();
+      return;
+    }
+
+    const bounceStrength = clamp(0.34 + speedCm * 0.10, 0.34, 0.62);
+    bird.y = groundTop - bird.size / 2;
+    bird.velocityY = -Math.abs(bird.velocityY) * bounceStrength;
+    bird.angle = Math.max(0.55, bird.angle * 0.72);
+    bird.embedDepth = 0;
+    deathPose = "bounce";
+    spawnDirtBurst(bird.x + bird.size * 0.12, groundTop, Math.min(1.15, speedCm), false);
+    playGroundBounceSound();
+
+    if (Math.abs(bird.velocityY) < cmToPx(0.42)) {
+      bird.velocityY = 0;
+      birdSettledAfterDeath = true;
+      bird.angle = 1.0;
+    }
+  }
+
+  function rectsOverlap(a, b) {
+    return a.right > b.left && a.left < b.right && a.bottom > b.top && a.top < b.bottom;
+  }
+
+  function resolvePipeRectCollision(prevBox, box, rect) {
+    if (!rectsOverlap(box, rect)) return false;
+
+    const overlapLeft = box.right - rect.left;
+    const overlapRight = rect.right - box.left;
+    const overlapTop = box.bottom - rect.top;
+    const overlapBottom = rect.bottom - box.top;
+
+    const minOverlap = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
+
+    let normalX = 0;
+    let normalY = 0;
+
+    const cameFromTop = prevBox.bottom <= rect.top;
+    const cameFromBottom = prevBox.top >= rect.bottom;
+    const cameFromLeft = prevBox.right <= rect.left;
+    const cameFromRight = prevBox.left >= rect.right;
+
+    if (cameFromTop) {
+      normalY = -1;
+    } else if (cameFromBottom) {
+      normalY = 1;
+    } else if (cameFromLeft) {
+      normalX = -1;
+    } else if (cameFromRight) {
+      normalX = 1;
+    } else {
+      if (minOverlap === overlapLeft) normalX = -1;
+      else if (minOverlap === overlapRight) normalX = 1;
+      else if (minOverlap === overlapTop) normalY = -1;
+      else normalY = 1;
+    }
+
+    if (normalY === -1) {
+      bird.y = rect.top - bird.size / 2;
+      if (Math.abs(bird.velocityY) > cmToPx(0.55)) {
+        bird.velocityY = -Math.abs(bird.velocityY) * 0.26;
+        playPipeBounceSound();
+        bird.angle = 0.92;
+        deathPose = "pipe";
+        if (Math.abs(bird.velocityY) < cmToPx(0.38)) {
+          bird.velocityY = 0;
+          birdSettledAfterDeath = true;
+        }
+      } else {
+        bird.velocityY = 0;
+        bird.angle = 1.18;
+        birdSettledAfterDeath = true;
+        deathPose = "pipe";
+        playPipeHitSound();
+      }
+      return true;
+    }
+
+    if (normalY === 1) {
+      bird.y = rect.bottom + bird.size / 2;
+      bird.velocityY = 0;
+      bird.angle = 1.48;
+      birdSettledAfterDeath = true;
+      deathPose = "pipe";
+      playPipeHitSound();
+      return true;
+    }
+
+    if (normalX === -1) {
+      bird.x = rect.left - bird.size / 2;
+      bird.velocityY *= 0.55;
+      bird.angle = 1.12;
+      birdSettledAfterDeath = true;
+      deathPose = "pipe";
+      playPipeHitSound();
+      return true;
+    }
+
+    if (normalX === 1) {
+      bird.x = rect.right + bird.size / 2;
+      bird.velocityY *= 0.55;
+      bird.angle = 1.12;
+      birdSettledAfterDeath = true;
+      deathPose = "pipe";
+      playPipeHitSound();
+      return true;
+    }
+
+    return false;
   }
 
   function updateClouds(dt, sceneSpeedPxPerSec) {
@@ -423,13 +612,7 @@
   function checkCollisions() {
     if (state !== "playing") return;
 
-    const birdBox = {
-      left: bird.x - bird.size / 2,
-      right: bird.x + bird.size / 2,
-      top: bird.y - bird.size / 2,
-      bottom: bird.y + bird.size / 2
-    };
-
+    const birdBox = getBirdBoxAt(bird.x, bird.y);
     const groundTop = height - cmToPx(CM.groundHeight);
 
     if (birdBox.bottom >= groundTop) {
@@ -462,7 +645,9 @@
     if (state === "gameover") return;
 
     state = "gameover";
-    birdLandedAfterDeath = false;
+    birdSettledAfterDeath = false;
+    deathPose = "none";
+    bird.embedDepth = 0;
     bird.velocityY = Math.max(bird.velocityY, cmToPx(0.8));
     playGameOverSound();
   }
@@ -486,6 +671,7 @@
     }
 
     updateBird(dt);
+    updateParticles(dt);
 
     if (state === "playing") {
       updateClouds(dt, sceneSpeedPxPerSec);
@@ -623,6 +809,16 @@
     }
   }
 
+  function drawParticles() {
+    for (const p of dirtParticles) {
+      const alpha = clamp(p.life / p.maxLife, 0, 1);
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+    }
+    ctx.globalAlpha = 1;
+  }
+
   function drawBird() {
     const bodySize = bird.size;
     const x = bird.x;
@@ -707,6 +903,53 @@
     ctx.fillText(hsText, 18, 18);
   }
 
+  function drawSoundButton() {
+    const rect = getSoundButtonRect();
+
+    ctx.fillStyle = COLORS.buttonBg;
+    ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+
+    ctx.strokeStyle = COLORS.buttonBorder;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
+
+    const cx = rect.x + rect.w * 0.48;
+    const cy = rect.y + rect.h * 0.5;
+    const s = rect.w * 0.38;
+
+    ctx.strokeStyle = "#FFFFFF";
+    ctx.fillStyle = "#FFFFFF";
+    ctx.lineWidth = 2.6;
+    ctx.lineCap = "round";
+
+    ctx.beginPath();
+    ctx.moveTo(cx - s * 0.55, cy - s * 0.18);
+    ctx.lineTo(cx - s * 0.28, cy - s * 0.18);
+    ctx.lineTo(cx - s * 0.02, cy - s * 0.42);
+    ctx.lineTo(cx - s * 0.02, cy + s * 0.42);
+    ctx.lineTo(cx - s * 0.28, cy + s * 0.18);
+    ctx.lineTo(cx - s * 0.55, cy + s * 0.18);
+    ctx.closePath();
+    ctx.fill();
+
+    if (soundEnabled) {
+      ctx.beginPath();
+      ctx.arc(cx + s * 0.02, cy, s * 0.34, -0.75, 0.75);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(cx + s * 0.08, cy, s * 0.56, -0.75, 0.75);
+      ctx.stroke();
+    } else {
+      ctx.strokeStyle = COLORS.buttonOff;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(rect.x + rect.w * 0.22, rect.y + rect.h * 0.22);
+      ctx.lineTo(rect.x + rect.w * 0.78, rect.y + rect.h * 0.78);
+      ctx.stroke();
+    }
+  }
+
   function drawCenterMessage(title, subtitle) {
     ctx.fillStyle = COLORS.overlay;
     ctx.fillRect(0, 0, width, height);
@@ -753,8 +996,10 @@
     drawClouds();
     drawPipes();
     drawGround();
+    drawParticles();
     drawBird();
     drawScore();
+    drawSoundButton();
     drawHUDOverlays();
   }
 
@@ -781,6 +1026,13 @@
 
     canvas.addEventListener("pointerdown", (event) => {
       event.preventDefault();
+
+      const pos = getPointerPos(event);
+      if (pointInRect(pos.x, pos.y, getSoundButtonRect())) {
+        toggleSound();
+        return;
+      }
+
       triggerAction();
     });
 
@@ -788,6 +1040,22 @@
       "touchstart",
       (event) => {
         event.preventDefault();
+
+        const touch = event.changedTouches[0];
+        if (!touch) {
+          triggerAction();
+          return;
+        }
+
+        const rect = canvas.getBoundingClientRect();
+        const x = touch.clientX - rect.left;
+        const y = touch.clientY - rect.top;
+
+        if (pointInRect(x, y, getSoundButtonRect())) {
+          toggleSound();
+          return;
+        }
+
         triggerAction();
       },
       { passive: false }
@@ -805,7 +1073,7 @@
       audioContext = new AudioCtx();
 
       masterGain = audioContext.createGain();
-      masterGain.gain.value = 0.18;
+      masterGain.gain.value = soundEnabled ? 0.18 : 0.0001;
       masterGain.connect(audioContext.destination);
     }
 
@@ -817,10 +1085,19 @@
       startBackgroundMusic();
       bgmStarted = true;
     }
+
+    updateMasterGain();
+  }
+
+  function updateMasterGain() {
+    if (!masterGain || !audioContext) return;
+    const now = audioContext.currentTime;
+    masterGain.gain.cancelScheduledValues(now);
+    masterGain.gain.linearRampToValueAtTime(soundEnabled ? 0.18 : 0.0001, now + 0.04);
   }
 
   function playFlapSound() {
-    if (!audioContext || !masterGain) return;
+    if (!audioContext || !masterGain || !soundEnabled) return;
 
     const now = audioContext.currentTime;
 
@@ -857,7 +1134,7 @@
   }
 
   function playGameOverSound() {
-    if (!audioContext || !masterGain) return;
+    if (!audioContext || !masterGain || !soundEnabled) return;
 
     const now = audioContext.currentTime;
 
@@ -882,6 +1159,136 @@
 
     osc.start(now);
     osc.stop(now + 0.42);
+  }
+
+  function playGroundThudSound() {
+    if (!audioContext || !masterGain || !soundEnabled) return;
+
+    const now = audioContext.currentTime;
+    const osc = audioContext.createOscillator();
+    const noise = audioContext.createBufferSource();
+    const gain = audioContext.createGain();
+    const noiseGain = audioContext.createGain();
+    const lp = audioContext.createBiquadFilter();
+
+    osc.type = "triangle";
+    osc.frequency.setValueAtTime(180, now);
+    osc.frequency.exponentialRampToValueAtTime(92, now + 0.18);
+
+    const buffer = audioContext.createBuffer(1, audioContext.sampleRate * 0.18, audioContext.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * 0.6;
+    noise.buffer = buffer;
+
+    lp.type = "lowpass";
+    lp.frequency.setValueAtTime(520, now);
+
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.linearRampToValueAtTime(0.08, now + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
+
+    noiseGain.gain.setValueAtTime(0.0001, now);
+    noiseGain.gain.linearRampToValueAtTime(0.05, now + 0.005);
+    noiseGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+
+    osc.connect(lp);
+    noise.connect(noiseGain);
+    lp.connect(gain);
+    gain.connect(masterGain);
+    noiseGain.connect(masterGain);
+
+    osc.start(now);
+    noise.start(now);
+    osc.stop(now + 0.24);
+    noise.stop(now + 0.18);
+  }
+
+  function playGroundBounceSound() {
+    if (!audioContext || !masterGain || !soundEnabled) return;
+
+    const now = audioContext.currentTime;
+    const osc = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+    const filter = audioContext.createBiquadFilter();
+
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(240, now);
+    osc.frequency.exponentialRampToValueAtTime(135, now + 0.14);
+
+    filter.type = "lowpass";
+    filter.frequency.setValueAtTime(950, now);
+
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.linearRampToValueAtTime(0.055, now + 0.008);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(masterGain);
+
+    osc.start(now);
+    osc.stop(now + 0.20);
+  }
+
+  function playPipeHitSound() {
+    if (!audioContext || !masterGain || !soundEnabled) return;
+
+    const now = audioContext.currentTime;
+    const osc1 = audioContext.createOscillator();
+    const osc2 = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+    const hp = audioContext.createBiquadFilter();
+
+    osc1.type = "triangle";
+    osc2.type = "sine";
+    osc1.frequency.setValueAtTime(760, now);
+    osc2.frequency.setValueAtTime(1180, now);
+
+    hp.type = "highpass";
+    hp.frequency.setValueAtTime(320, now);
+
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.linearRampToValueAtTime(0.05, now + 0.004);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.11);
+
+    osc1.connect(hp);
+    osc2.connect(hp);
+    hp.connect(gain);
+    gain.connect(masterGain);
+
+    osc1.start(now);
+    osc2.start(now);
+    osc1.stop(now + 0.12);
+    osc2.stop(now + 0.12);
+  }
+
+  function playPipeBounceSound() {
+    if (!audioContext || !masterGain || !soundEnabled) return;
+
+    const now = audioContext.currentTime;
+    const osc1 = audioContext.createOscillator();
+    const osc2 = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+
+    osc1.type = "sine";
+    osc2.type = "triangle";
+    osc1.frequency.setValueAtTime(620, now);
+    osc1.frequency.exponentialRampToValueAtTime(420, now + 0.12);
+    osc2.frequency.setValueAtTime(930, now);
+    osc2.frequency.exponentialRampToValueAtTime(660, now + 0.10);
+
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.linearRampToValueAtTime(0.045, now + 0.005);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+
+    osc1.connect(gain);
+    osc2.connect(gain);
+    gain.connect(masterGain);
+
+    osc1.start(now);
+    osc2.start(now);
+    osc1.stop(now + 0.17);
+    osc2.stop(now + 0.17);
   }
 
   function playMusicNote(time, freq, duration, volume) {
@@ -958,7 +1365,7 @@
     ];
 
     const bass = [
-      196.00, 220.00, 174.61, 196.00
+      196.0, 220.0, 174.61, 196.0
     ];
 
     const start = nextMusicTime;
