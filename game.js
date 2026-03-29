@@ -71,11 +71,20 @@
     settleVerticalPx: 14
   };
 
+  const EASTER = {
+    swipeMinDistance: 55,
+    swipeMaxOffAxis: 48,
+    swipeWindowMs: 1400,
+    reverseFlightSpeedCm: 1.25,
+    reverseReturnThresholdPx: 8,
+    offscreenFlightSpeedCm: 1.75
+  };
+
   let width = 0;
   let height = 0;
   let scale = 0;
 
-  let state = "ready";
+  let state = "ready"; // ready | playing | gameover | easter_end
   let lastTime = 0;
   let elapsedGameTime = 0;
 
@@ -91,13 +100,20 @@
   let birdSettledAfterDeath = false;
   let deathPose = "none";
   let soundEnabled = true;
-  let suppressNextClick = false;
 
   let audioContext = null;
   let masterGain = null;
   let bgmStarted = false;
   let nextMusicTime = 0;
   let musicSchedulerLookAhead = null;
+
+  // Easter egg / world tracking
+  let worldOffsetPx = 0;
+  let furthestWorldOffsetPx = 0;
+  let reverseMode = false;
+  let worldFrozenForExit = false;
+  let leftSwipeTimes = [];
+  let pointerTracking = null;
 
   function cmToPx(cm) {
     return cm * scale;
@@ -146,12 +162,20 @@
     clouds = createClouds();
     dirtParticles = [];
     groundOffsetPx = 0;
+    worldOffsetPx = 0;
+    furthestWorldOffsetPx = 0;
+    reverseMode = false;
+    worldFrozenForExit = false;
+    leftSwipeTimes = [];
     score = 0;
     elapsedGameTime = 0;
     birdSettledAfterDeath = false;
     deathPose = "none";
     highScore = previousHighScore;
-    state = previousState === "gameover" ? "ready" : previousState;
+    state =
+      previousState === "gameover" || previousState === "easter_end"
+        ? "ready"
+        : previousState;
 
     createInitialPipes();
   }
@@ -160,10 +184,16 @@
     state = "ready";
     bird = createBird();
     pipes = [];
+    clouds = createClouds();
     dirtParticles = [];
+    groundOffsetPx = 0;
+    worldOffsetPx = 0;
+    furthestWorldOffsetPx = 0;
+    reverseMode = false;
+    worldFrozenForExit = false;
+    leftSwipeTimes = [];
     score = 0;
     elapsedGameTime = 0;
-    groundOffsetPx = 0;
     birdSettledAfterDeath = false;
     deathPose = "none";
     createInitialPipes();
@@ -203,8 +233,8 @@
   }
 
   function createInitialPipes() {
-    const firstX = width + cmToPx(0.8);
-    pipes.push(createPipe(firstX));
+    const firstWorldX = width + cmToPx(0.8);
+    pipes.push(createPipe(firstWorldX));
     ensurePipesFilled();
   }
 
@@ -229,7 +259,7 @@
     return clamp(byTime + byScoreBonus, CM.initialSceneSpeed, CM.maxSceneSpeed);
   }
 
-  function createPipe(startX) {
+  function createPipe(worldX) {
     const gapHeight = cmToPx(CM.pipeGapHeight);
     const pipeWidth = cmToPx(CM.pipeWidth);
     const groundHeight = cmToPx(CM.groundHeight);
@@ -239,28 +269,36 @@
     const gapTop = lerp(minTop, maxTop, Math.random());
 
     return {
-      x: startX,
+      worldX,
       width: pipeWidth,
       gapTop,
       gapHeight,
-      scored: false
+      scoredForward: false,
+      crossedBackward: false
     };
   }
 
   function ensurePipesFilled() {
     const pipeWidthPx = cmToPx(CM.pipeWidth);
     const spacingPx = cmToPx(getPipeSpacingCm(score));
-    const minRightEdge = width + spacingPx + pipeWidthPx;
+    const minRightWorldX = worldOffsetPx + width + spacingPx + pipeWidthPx;
 
     if (pipes.length === 0) {
-      pipes.push(createPipe(width + cmToPx(0.8)));
+      pipes.push(createPipe(worldOffsetPx + width + cmToPx(0.8)));
     }
 
-    while (pipes.length < 4 || pipes[pipes.length - 1].x < minRightEdge) {
+    while (
+      pipes.length < 4 ||
+      pipes[pipes.length - 1].worldX < minRightWorldX
+    ) {
       const lastPipe = pipes[pipes.length - 1];
-      const nextX = lastPipe.x + pipeWidthPx + spacingPx;
+      const nextX = lastPipe.worldX + pipeWidthPx + spacingPx;
       pipes.push(createPipe(nextX));
     }
+  }
+
+  function getPipeScreenX(pipe) {
+    return pipe.worldX - worldOffsetPx;
   }
 
   function startPlayingIfNeeded() {
@@ -271,7 +309,7 @@
   }
 
   function flapBird() {
-    if (state === "gameover") return;
+    if (state === "gameover" || state === "easter_end") return;
     bird.velocityY = cmToPx(CM.jumpImpulse);
     playFlapSound();
   }
@@ -322,8 +360,44 @@
       return;
     }
 
-    if (state === "gameover") {
+    if (state === "gameover" || state === "easter_end") {
       resetGame();
+    }
+  }
+
+  function enterReverseMode() {
+    if (state !== "playing" || reverseMode) return;
+    reverseMode = true;
+  }
+
+  function exitReverseMode() {
+    if (state !== "playing" || !reverseMode) return;
+    reverseMode = false;
+    worldFrozenForExit = false;
+  }
+
+  function registerSwipe(dx, dy) {
+    if (state !== "playing") return;
+
+    if (Math.abs(dy) > EASTER.swipeMaxOffAxis) return;
+    if (Math.abs(dx) < EASTER.swipeMinDistance) return;
+
+    const now = performance.now();
+
+    if (dx < 0) {
+      leftSwipeTimes = leftSwipeTimes.filter(
+        (t) => now - t <= EASTER.swipeWindowMs
+      );
+      leftSwipeTimes.push(now);
+      if (leftSwipeTimes.length >= 3) {
+        enterReverseMode();
+        leftSwipeTimes = [];
+      }
+    } else if (dx > 0) {
+      leftSwipeTimes = [];
+      if (reverseMode) {
+        exitReverseMode();
+      }
     }
   }
 
@@ -407,8 +481,16 @@
       bird.velocityY = Math.min(bird.velocityY, maxFallSpeedPx);
       bird.y += bird.velocityY * dt;
 
-      const t = clamp(bird.velocityY / maxFallSpeedPx, -1, 1);
-      bird.angle = lerp(-0.6, 1.2, (t + 1) / 2);
+      if (reverseMode) {
+        bird.angle = lerp(
+          0.6,
+          -1.2,
+          clamp((-bird.velocityY) / maxFallSpeedPx, -1, 1) * 0.5 + 0.5
+        );
+      } else {
+        const t = clamp(bird.velocityY / maxFallSpeedPx, -1, 1);
+        bird.angle = lerp(-0.6, 1.2, (t + 1) / 2);
+      }
       return;
     }
 
@@ -439,7 +521,6 @@
       bird.y += bird.velocityY * dt;
       bird.angle = lerp(bird.angle, 1.42, 0.12);
 
-      resolveDeathScoreCrossings(prevX, bird.x);
       resolveDeathCollision(prevX, prevY, groundTop);
 
       const speed = Math.hypot(bird.velocityX, bird.velocityY);
@@ -456,24 +537,6 @@
     }
   }
 
-  function resolveDeathScoreCrossings(prevX, currentX) {
-    if (prevX === currentX) return;
-
-    for (const pipe of pipes) {
-      const lineX = pipe.x + pipe.width;
-
-      if (prevX <= lineX && currentX > lineX) {
-        score += 1;
-        if (score > highScore) {
-          highScore = score;
-          localStorage.setItem("flappy_high_score", String(highScore));
-        }
-      } else if (prevX >= lineX && currentX < lineX) {
-        score = Math.max(0, score - 1);
-      }
-    }
-  }
-
   function isBirdRestingOnSurface() {
     const box = getBirdBoxAt(bird.x, bird.y);
     const groundTop = height - cmToPx(CM.groundHeight);
@@ -481,16 +544,17 @@
     if (Math.abs(box.bottom - groundTop) < 1.5) return true;
 
     for (const pipe of pipes) {
+      const screenX = getPipeScreenX(pipe);
       const topRect = {
-        left: pipe.x,
-        right: pipe.x + pipe.width,
+        left: screenX,
+        right: screenX + pipe.width,
         top: 0,
         bottom: pipe.gapTop
       };
 
       const bottomRect = {
-        left: pipe.x,
-        right: pipe.x + pipe.width,
+        left: screenX,
+        right: screenX + pipe.width,
         top: pipe.gapTop + pipe.gapHeight,
         bottom: groundTop
       };
@@ -528,16 +592,17 @@
       let collided = false;
 
       for (const pipe of pipes) {
+        const screenX = getPipeScreenX(pipe);
         const topRect = {
-          left: pipe.x,
-          right: pipe.x + pipe.width,
+          left: screenX,
+          right: screenX + pipe.width,
           top: 0,
           bottom: pipe.gapTop
         };
 
         const bottomRect = {
-          left: pipe.x,
-          right: pipe.x + pipe.width,
+          left: screenX,
+          right: screenX + pipe.width,
           top: pipe.gapTop + pipe.gapHeight,
           bottom: groundTop
         };
@@ -691,6 +756,8 @@
   function updateClouds(dt, sceneSpeedPxPerSec) {
     if (state !== "playing") return;
 
+    if (worldFrozenForExit) return;
+
     for (const cloud of clouds) {
       cloud.x -= sceneSpeedPxPerSec * cloud.speedFactor * dt;
 
@@ -704,27 +771,69 @@
   function updatePipes(dt, sceneSpeedPxPerSec) {
     if (state !== "playing") return;
 
-    const moveX = sceneSpeedPxPerSec * dt;
+    const birdLine = bird.x;
+    const previousWorldOffset = worldOffsetPx;
 
-    for (const pipe of pipes) {
-      pipe.x -= moveX;
+    if (reverseMode) {
+      if (!worldFrozenForExit) {
+        const reverseWorldDelta = cmToPx(EASTER.reverseFlightSpeedCm) * dt;
+        worldOffsetPx -= reverseWorldDelta;
 
-      if (!pipe.scored && bird.x > pipe.x + pipe.width) {
-        pipe.scored = true;
-        score += 1;
+        if (worldOffsetPx <= EASTER.reverseReturnThresholdPx) {
+          worldOffsetPx = 0;
+          worldFrozenForExit = true;
+        }
+      } else {
+        bird.x -= cmToPx(EASTER.offscreenFlightSpeedCm) * dt;
+        if (bird.x + bird.size / 2 < 0) {
+          state = "easter_end";
+        }
+      }
+    } else {
+      const moveX = sceneSpeedPxPerSec * dt;
+      worldOffsetPx += moveX;
+      furthestWorldOffsetPx = Math.max(furthestWorldOffsetPx, worldOffsetPx);
+    }
 
-        if (score > highScore) {
-          highScore = score;
-          localStorage.setItem("flappy_high_score", String(highScore));
+    if (!reverseMode) {
+      for (const pipe of pipes) {
+        const prevScreenX = pipe.worldX - previousWorldOffset;
+        const currScreenX = pipe.worldX - worldOffsetPx;
+        const prevLine = prevScreenX + pipe.width;
+        const currLine = currScreenX + pipe.width;
+
+        if (!pipe.scoredForward && prevLine >= birdLine && currLine < birdLine) {
+          pipe.scoredForward = true;
+          pipe.crossedBackward = false;
+          score += 1;
+          if (score > highScore) {
+            highScore = score;
+            localStorage.setItem("flappy_high_score", String(highScore));
+          }
+        }
+      }
+    } else {
+      for (const pipe of pipes) {
+        const prevLine = pipe.worldX - previousWorldOffset + pipe.width;
+        const currLine = pipe.worldX - worldOffsetPx + pipe.width;
+
+        if (prevLine <= birdLine && currLine > birdLine) {
+          score = Math.max(0, score - 1);
         }
       }
     }
 
-    while (pipes.length && pipes[0].x + pipes[0].width < -10) {
+    while (
+      pipes.length &&
+      !reverseMode &&
+      pipes[0].worldX + pipes[0].width < worldOffsetPx - 10
+    ) {
       pipes.shift();
     }
 
-    ensurePipesFilled();
+    if (!reverseMode) {
+      ensurePipesFilled();
+    }
   }
 
   function checkCollisions() {
@@ -744,8 +853,8 @@
     }
 
     for (const pipe of pipes) {
-      const pipeLeft = pipe.x;
-      const pipeRight = pipe.x + pipe.width;
+      const pipeLeft = getPipeScreenX(pipe);
+      const pipeRight = pipeLeft + pipe.width;
       const gapTop = pipe.gapTop;
       const gapBottom = pipe.gapTop + pipe.gapHeight;
 
@@ -760,7 +869,7 @@
   }
 
   function gameOver() {
-    if (state === "gameover") return;
+    if (state === "gameover" || state === "easter_end") return;
 
     state = "gameover";
     birdSettledAfterDeath = false;
@@ -775,19 +884,24 @@
 
   function updateGround(dt, sceneSpeedPxPerSec) {
     if (state !== "playing") return;
+    if (worldFrozenForExit) return;
 
-    groundOffsetPx -= sceneSpeedPxPerSec * dt;
-    const grassStripe = cmToPx(0.18);
-    if (groundOffsetPx <= -grassStripe) {
-      groundOffsetPx += grassStripe;
+    if (!reverseMode) {
+      groundOffsetPx -= sceneSpeedPxPerSec * dt;
+    } else {
+      groundOffsetPx += cmToPx(EASTER.reverseFlightSpeedCm) * dt;
     }
+
+    const grassStripe = cmToPx(0.18);
+    while (groundOffsetPx <= -grassStripe) groundOffsetPx += grassStripe;
+    while (groundOffsetPx >= grassStripe) groundOffsetPx -= grassStripe;
   }
 
   function update(dt) {
     const sceneSpeedCmPerSec = getSceneSpeedCmPerSec(elapsedGameTime, score);
     const sceneSpeedPxPerSec = cmToPx(sceneSpeedCmPerSec);
 
-    if (state === "playing") {
+    if (state === "playing" && !reverseMode) {
       elapsedGameTime += dt;
     }
 
@@ -798,7 +912,9 @@
       updateClouds(dt, sceneSpeedPxPerSec);
       updatePipes(dt, sceneSpeedPxPerSec);
       updateGround(dt, sceneSpeedPxPerSec);
-      checkCollisions();
+      if (state === "playing") {
+        checkCollisions();
+      }
     }
   }
 
@@ -838,13 +954,14 @@
   }
 
   function drawPipe(pipe) {
+    const x = getPipeScreenX(pipe);
     const groundTop = height - cmToPx(CM.groundHeight);
     const capHeight = cmToPx(0.08);
     const capOverhang = cmToPx(0.04);
 
-    drawPipeSegment(pipe.x, 0, pipe.width, pipe.gapTop);
+    drawPipeSegment(x, 0, pipe.width, pipe.gapTop);
     drawPipeSegment(
-      pipe.x,
+      x,
       pipe.gapTop + pipe.gapHeight,
       pipe.width,
       groundTop - (pipe.gapTop + pipe.gapHeight)
@@ -852,13 +969,13 @@
 
     ctx.fillStyle = COLORS.pipeDark;
     ctx.fillRect(
-      pipe.x - capOverhang,
+      x - capOverhang,
       pipe.gapTop - capHeight,
       pipe.width + capOverhang * 2,
       capHeight
     );
     ctx.fillRect(
-      pipe.x - capOverhang,
+      x - capOverhang,
       pipe.gapTop + pipe.gapHeight,
       pipe.width + capOverhang * 2,
       capHeight
@@ -866,13 +983,13 @@
 
     ctx.fillStyle = COLORS.pipeHighlight;
     ctx.fillRect(
-      pipe.x - capOverhang,
+      x - capOverhang,
       pipe.gapTop - capHeight,
       pipe.width * 0.25,
       capHeight
     );
     ctx.fillRect(
-      pipe.x - capOverhang,
+      x - capOverhang,
       pipe.gapTop + pipe.gapHeight,
       pipe.width * 0.25,
       capHeight
@@ -892,6 +1009,8 @@
 
   function drawPipes() {
     for (const pipe of pipes) {
+      const x = getPipeScreenX(pipe);
+      if (x + pipe.width < -120 || x > width + 120) continue;
       drawPipe(pipe);
     }
   }
@@ -946,6 +1065,11 @@
 
     ctx.save();
     ctx.translate(x, y);
+
+    if (reverseMode && state === "playing") {
+      ctx.scale(-1, 1);
+    }
+
     ctx.rotate(bird.angle);
 
     ctx.fillStyle = COLORS.birdShadow;
@@ -1071,6 +1195,66 @@
     }
   }
 
+  function drawEasterEnding() {
+    ctx.fillStyle = "rgba(0,0,0,0.18)";
+    ctx.fillRect(0, 0, width, height);
+
+    const bx = width * 0.52;
+    const by = height * 0.18;
+    const s = Math.max(36, cmToPx(0.26));
+
+    ctx.save();
+    ctx.translate(bx, by);
+
+    ctx.fillStyle = COLORS.birdShadow;
+    ctx.fillRect(-s / 2 + s * 0.08, -s / 2 + s * 0.08, s, s);
+
+    ctx.fillStyle = COLORS.birdBody;
+    ctx.fillRect(-s / 2, -s / 2, s, s);
+
+    ctx.fillStyle = COLORS.wing;
+    ctx.fillRect(-s * 0.62, -s * 0.08, s * 0.48, s * 0.18);
+
+    ctx.fillStyle = "#111111";
+    ctx.beginPath();
+    ctx.arc(s * 0.15, -s * 0.08, s * 0.07, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = COLORS.beak;
+    ctx.beginPath();
+    ctx.moveTo(s / 2, -s * 0.08);
+    ctx.lineTo(s / 2 + s * 0.35, 0);
+    ctx.lineTo(s / 2, s * 0.08);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = "#FFFFFF";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.64, 0);
+    ctx.lineTo(-s * 1.15, -s * 0.06);
+    ctx.stroke();
+
+    ctx.fillStyle = "#FFFFFF";
+    ctx.fillRect(-s * 1.15, -s * 0.22, s * 0.72, s * 0.44);
+
+    ctx.fillStyle = "#222222";
+    ctx.font = `bold ${Math.max(14, Math.floor(height * 0.022))}px Arial`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("你認真？", -s * 0.79, 0);
+
+    ctx.restore();
+
+    ctx.font = `bold ${Math.max(18, Math.floor(height * 0.03))}px Arial`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.fillStyle = COLORS.textShadow;
+    ctx.fillText("點擊畫面重新開始", width / 2 + 2, height * 0.3 + 2);
+    ctx.fillStyle = COLORS.text;
+    ctx.fillText("點擊畫面重新開始", width / 2, height * 0.3);
+  }
+
   function drawCenterMessage(title, subtitle) {
     ctx.fillStyle = COLORS.overlay;
     ctx.fillRect(0, 0, width, height);
@@ -1109,6 +1293,8 @@
         "Game Over",
         `分數 ${score} / 最高分 ${highScore}　・　點擊或空白鍵重開`
       );
+    } else if (state === "easter_end") {
+      drawEasterEnding();
     }
   }
 
@@ -1118,10 +1304,10 @@
     drawPipes();
     drawGround();
     drawBird();
-    drawParticles();   // 改到鳥前面
+    drawParticles();
     drawScore();
     drawHUDOverlays();
-    drawSoundButton(); // 永遠畫最上層
+    drawSoundButton();
   }
 
   function frame(timestamp) {
@@ -1171,10 +1357,62 @@
         event.preventDefault();
         const touch = event.changedTouches[0];
         if (!touch) return;
-        handleCanvasPress(touch.clientX, touch.clientY);
+
+        const rect = canvas.getBoundingClientRect();
+        const x = touch.clientX - rect.left;
+        const y = touch.clientY - rect.top;
+
+        const soundRect = getSoundButtonRect();
+        if (pointInRect(x, y, soundRect)) {
+          handleCanvasPress(touch.clientX, touch.clientY);
+          pointerTracking = null;
+          return;
+        }
+
+        pointerTracking = {
+          startX: touch.clientX,
+          startY: touch.clientY,
+          id: touch.identifier
+        };
       },
       { passive: false }
     );
+
+    canvas.addEventListener(
+      "touchend",
+      (event) => {
+        if (!pointerTracking) return;
+
+        for (const touch of event.changedTouches) {
+          if (touch.identifier === pointerTracking.id) {
+            const dx = touch.clientX - pointerTracking.startX;
+            const dy = touch.clientY - pointerTracking.startY;
+            registerSwipe(dx, dy);
+            pointerTracking = null;
+            break;
+          }
+        }
+      },
+      { passive: false }
+    );
+
+    canvas.addEventListener("mousedown", (event) => {
+      const pos = getPointerPos(event);
+      if (pointInRect(pos.x, pos.y, getSoundButtonRect())) return;
+      pointerTracking = {
+        startX: event.clientX,
+        startY: event.clientY,
+        id: "mouse"
+      };
+    });
+
+    canvas.addEventListener("mouseup", (event) => {
+      if (!pointerTracking || pointerTracking.id !== "mouse") return;
+      const dx = event.clientX - pointerTracking.startX;
+      const dy = event.clientY - pointerTracking.startY;
+      registerSwipe(dx, dy);
+      pointerTracking = null;
+    });
 
     window.addEventListener("keydown", ensureAudio);
   }
@@ -1222,7 +1460,6 @@
     osc2.type = "triangle";
     osc1.frequency.setValueAtTime(880, now);
     osc1.frequency.exponentialRampToValueAtTime(660, now + 0.10);
-
     osc2.frequency.setValueAtTime(1320, now);
     osc2.frequency.exponentialRampToValueAtTime(920, now + 0.10);
 
