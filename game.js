@@ -79,7 +79,8 @@
     tapMaxDurationMs: 260,
     reverseFlightSpeedCm: 1.25,
     reverseReturnThresholdPx: 8,
-    offscreenFlightSpeedCm: 1.75
+    offscreenFlightSpeedCm: 1.75,
+    endingBirdSpeedCm: 0.62
   };
 
   let width = 0;
@@ -108,8 +109,11 @@
   let bgmStarted = false;
   let nextMusicTime = 0;
   let musicSchedulerLookAhead = null;
+
   let easterBgmActive = false;
   let easterBgmNodes = [];
+  let easterEndingReadyToReset = false;
+  let easterEndingBird = null;
 
   let worldOffsetPx = 0;
   let reverseMode = false;
@@ -163,19 +167,25 @@
     clouds = createClouds();
     dirtParticles = [];
     groundOffsetPx = 0;
+
     worldOffsetPx = 0;
     reverseMode = false;
     worldFrozenForExit = false;
     leftSwipeTimes = [];
     pointerTracking = null;
+
     score = 0;
     elapsedGameTime = 0;
     birdSettledAfterDeath = false;
     deathPose = "none";
+
     highScore = previousHighScore;
     state = "ready";
 
+    easterEndingBird = null;
+    easterEndingReadyToReset = false;
     stopEasterEndingMusic();
+
     createInitialPipes();
   }
 
@@ -185,12 +195,9 @@
 
   function createBird() {
     const size = cmToPx(CM.birdSize);
-    const x = width * CM.birdXRatio;
-    const y = height * 0.40;
-
     return {
-      x,
-      y,
+      x: width * CM.birdXRatio,
+      y: height * 0.40,
       size,
       wingTimer: 0,
       angle: -0.08,
@@ -328,7 +335,14 @@
       return;
     }
 
-    if (state === "gameover" || state === "easter_end") {
+    if (state === "gameover") {
+      if (!birdSettledAfterDeath) return;
+      resetGame();
+      return;
+    }
+
+    if (state === "easter_end") {
+      if (!easterEndingReadyToReset) return;
       resetGame();
     }
   }
@@ -353,6 +367,7 @@
     const now = performance.now();
 
     if (dx < 0) {
+      flapBird();
       leftSwipeTimes = leftSwipeTimes.filter((t) => now - t <= EASTER.swipeWindowMs);
       leftSwipeTimes.push(now);
       if (leftSwipeTimes.length >= 3) {
@@ -447,11 +462,10 @@
       bird.velocityY = Math.min(bird.velocityY, maxFallSpeedPx);
       bird.y += bird.velocityY * dt;
 
+      const t = clamp(bird.velocityY / maxFallSpeedPx, -1, 1);
       if (reverseMode) {
-        const t = clamp(bird.velocityY / maxFallSpeedPx, -1, 1);
         bird.angle = lerp(0.6, -1.2, (t + 1) / 2);
       } else {
-        const t = clamp(bird.velocityY / maxFallSpeedPx, -1, 1);
         bird.angle = lerp(-0.6, 1.2, (t + 1) / 2);
       }
       return;
@@ -736,7 +750,7 @@
         bird.x -= cmToPx(EASTER.offscreenFlightSpeedCm) * dt;
         if (bird.x + bird.size / 2 < 0) {
           state = "easter_end";
-          startEasterEndingMusic();
+          beginEasterEnding();
         }
       }
     } else {
@@ -779,6 +793,24 @@
 
     if (!reverseMode) {
       ensurePipesFilled();
+    }
+  }
+
+  function beginEasterEnding() {
+    easterEndingReadyToReset = false;
+    easterEndingBird = {
+      x: width + cmToPx(0.5),
+      y: height * 0.18,
+      speed: cmToPx(EASTER.endingBirdSpeedCm)
+    };
+    startEasterEndingMusic();
+  }
+
+  function updateEasterEnding(dt) {
+    if (state !== "easter_end" || !easterEndingBird) return;
+    easterEndingBird.x -= easterEndingBird.speed * dt;
+    if (easterEndingBird.x < -cmToPx(1.4)) {
+      easterEndingReadyToReset = true;
     }
   }
 
@@ -851,6 +883,11 @@
       elapsedGameTime += dt;
     }
 
+    if (state === "easter_end") {
+      updateEasterEnding(dt);
+      return;
+    }
+
     updateBird(dt);
     updateParticles(dt);
 
@@ -868,7 +905,6 @@
     const gradient = ctx.createLinearGradient(0, 0, 0, height);
     gradient.addColorStop(0, COLORS.skyGradient);
     gradient.addColorStop(1, COLORS.skyMain);
-
     ctx.fillStyle = gradient;
     ctx.fillRect(0, 0, width, height);
   }
@@ -965,64 +1001,63 @@
     }
   }
 
-  function drawBird() {
-    const bodySize = bird.size;
-    const x = bird.x;
-    const y = bird.y;
-
-    const beakLength = cmToPx(CM.birdBeakLength);
-    const beakWidth = cmToPx(CM.birdBeakWidth);
-    const wingLength = cmToPx(CM.birdWingLength);
-    const wingWidth = cmToPx(CM.birdWingWidth);
-
-    const wingRate = bird.velocityY < 0 ? 8 : 6;
-    const wingAmplitude = bird.velocityY < 0 ? 0.75 : 0.45;
-    const wingAngle = Math.sin(bird.wingTimer * wingRate * Math.PI * 2) * wingAmplitude;
+  function drawBirdSprite(x, y, size, angle, mirrored, withFace = true) {
+    const beakLength = size * 0.5;
+    const beakWidth = size * 0.125;
+    const wingLength = size * 0.5;
+    const wingWidth = size * 0.125;
+    const wingAngle = Math.sin(performance.now() * 0.012) * 0.35;
 
     ctx.save();
     ctx.translate(x, y);
 
-    if (reverseMode && state === "playing") {
+    if (mirrored) {
       ctx.scale(-1, 1);
     }
 
-    ctx.rotate(bird.angle);
+    ctx.rotate(angle);
 
     ctx.fillStyle = COLORS.birdShadow;
-    ctx.fillRect(-bodySize / 2 + bodySize * 0.08, -bodySize / 2 + bodySize * 0.08, bodySize, bodySize);
+    ctx.fillRect(-size / 2 + size * 0.08, -size / 2 + size * 0.08, size, size);
 
     ctx.fillStyle = COLORS.birdBody;
-    ctx.fillRect(-bodySize / 2, -bodySize / 2, bodySize, bodySize);
+    ctx.fillRect(-size / 2, -size / 2, size, size);
 
     ctx.save();
-    ctx.translate(-bodySize * 0.05, 0);
+    ctx.translate(-size * 0.05, 0);
     ctx.rotate(wingAngle);
     ctx.fillStyle = COLORS.wing;
     ctx.fillRect(-wingLength * 0.55, -wingWidth / 2, wingLength, wingWidth);
     ctx.restore();
 
-    ctx.fillStyle = "#111111";
-    ctx.beginPath();
-    ctx.arc(bodySize * 0.14, -bodySize * 0.1, bodySize * 0.06, 0, Math.PI * 2);
-    ctx.fill();
+    if (withFace) {
+      ctx.fillStyle = "#111111";
+      ctx.beginPath();
+      ctx.arc(size * 0.14, -size * 0.1, size * 0.06, 0, Math.PI * 2);
+      ctx.fill();
+    }
 
     ctx.fillStyle = COLORS.beakShadow;
     ctx.beginPath();
-    ctx.moveTo(bodySize / 2, -beakWidth / 2 + beakWidth * 0.35);
-    ctx.lineTo(bodySize / 2 + beakLength, 0 + beakWidth * 0.35);
-    ctx.lineTo(bodySize / 2, beakWidth / 2 + beakWidth * 0.35);
+    ctx.moveTo(size / 2, -beakWidth / 2 + beakWidth * 0.35);
+    ctx.lineTo(size / 2 + beakLength, 0 + beakWidth * 0.35);
+    ctx.lineTo(size / 2, beakWidth / 2 + beakWidth * 0.35);
     ctx.closePath();
     ctx.fill();
 
     ctx.fillStyle = COLORS.beak;
     ctx.beginPath();
-    ctx.moveTo(bodySize / 2, -beakWidth / 2);
-    ctx.lineTo(bodySize / 2 + beakLength, 0);
-    ctx.lineTo(bodySize / 2, beakWidth / 2);
+    ctx.moveTo(size / 2, -beakWidth / 2);
+    ctx.lineTo(size / 2 + beakLength, 0);
+    ctx.lineTo(size / 2, beakWidth / 2);
     ctx.closePath();
     ctx.fill();
 
     ctx.restore();
+  }
+
+  function drawBird() {
+    drawBirdSprite(bird.x, bird.y, bird.size, bird.angle, reverseMode && state === "playing", true);
   }
 
   function drawParticles() {
@@ -1036,6 +1071,8 @@
   }
 
   function drawScore() {
+    if (state === "easter_end") return;
+
     const fontSize = Math.max(26, Math.floor(height * 0.05));
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
@@ -1106,64 +1143,74 @@
     }
   }
 
-  function drawEasterEnding() {
-    ctx.fillStyle = "rgba(0,0,0,0.18)";
-    ctx.fillRect(0, 0, width, height);
-
-    const bx = width * 0.52;
-    const by = height * 0.18;
-    const s = Math.max(36, cmToPx(0.26));
+  function drawWhiteClothFlag(x, y, scaleSize) {
+    const poleLen = scaleSize * 0.8;
+    const clothW = scaleSize * 0.95;
+    const clothH = scaleSize * 0.55;
 
     ctx.save();
-    ctx.translate(bx, by);
+    ctx.translate(x, y);
 
-    ctx.fillStyle = COLORS.birdShadow;
-    ctx.fillRect(-s / 2 + s * 0.08, -s / 2 + s * 0.08, s, s);
-
-    ctx.fillStyle = COLORS.birdBody;
-    ctx.fillRect(-s / 2, -s / 2, s, s);
-
-    ctx.fillStyle = COLORS.wing;
-    ctx.fillRect(-s * 0.62, -s * 0.08, s * 0.48, s * 0.18);
-
-    ctx.fillStyle = "#111111";
-    ctx.beginPath();
-    ctx.arc(s * 0.15, -s * 0.08, s * 0.07, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.fillStyle = COLORS.beak;
-    ctx.beginPath();
-    ctx.moveTo(s / 2, -s * 0.08);
-    ctx.lineTo(s / 2 + s * 0.35, 0);
-    ctx.lineTo(s / 2, s * 0.08);
-    ctx.closePath();
-    ctx.fill();
-
-    ctx.strokeStyle = "#FFFFFF";
+    ctx.strokeStyle = "#444";
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(-s * 0.64, 0);
-    ctx.lineTo(-s * 1.15, -s * 0.06);
+    ctx.moveTo(0, 0);
+    ctx.lineTo(-poleLen, -scaleSize * 0.05);
     ctx.stroke();
 
     ctx.fillStyle = "#FFFFFF";
-    ctx.fillRect(-s * 1.15, -s * 0.22, s * 0.72, s * 0.44);
+    ctx.beginPath();
+    ctx.moveTo(-poleLen, -clothH * 0.45);
+    ctx.bezierCurveTo(
+      -poleLen - clothW * 0.3, -clothH * 0.7,
+      -poleLen - clothW * 0.7, -clothH * 0.15,
+      -poleLen - clothW, -clothH * 0.35
+    );
+    ctx.bezierCurveTo(
+      -poleLen - clothW * 0.75, 0,
+      -poleLen - clothW * 0.95, clothH * 0.4,
+      -poleLen - clothW, clothH * 0.25
+    );
+    ctx.bezierCurveTo(
+      -poleLen - clothW * 0.62, clothH * 0.62,
+      -poleLen - clothW * 0.22, clothH * 0.28,
+      -poleLen, clothH * 0.42
+    );
+    ctx.closePath();
+    ctx.fill();
 
-    ctx.fillStyle = "#222222";
-    ctx.font = `bold ${Math.max(14, Math.floor(height * 0.022))}px Arial`;
+    ctx.strokeStyle = "rgba(0,0,0,0.18)";
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    ctx.fillStyle = "#444";
+    ctx.font = `bold ${Math.max(12, Math.floor(scaleSize * 0.16))}px Arial`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText("你認真？", -s * 0.79, 0);
+    ctx.fillText("你認真？", -poleLen - clothW * 0.52, 0);
 
     ctx.restore();
+  }
 
-    ctx.font = `bold ${Math.max(18, Math.floor(height * 0.03))}px Arial`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "top";
-    ctx.fillStyle = COLORS.textShadow;
-    ctx.fillText("點擊畫面重新開始", width / 2 + 2, height * 0.3 + 2);
-    ctx.fillStyle = COLORS.text;
-    ctx.fillText("點擊畫面重新開始", width / 2, height * 0.3);
+  function drawEasterEnding() {
+    if (!easterEndingBird) return;
+
+    drawBirdSprite(easterEndingBird.x, easterEndingBird.y, Math.max(34, cmToPx(0.24)), 0.02, true, false);
+    drawWhiteClothFlag(
+      easterEndingBird.x - Math.max(34, cmToPx(0.24)) * 0.52,
+      easterEndingBird.y,
+      Math.max(34, cmToPx(0.24))
+    );
+
+    if (easterEndingReadyToReset) {
+      ctx.font = `bold ${Math.max(18, Math.floor(height * 0.03))}px Arial`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      ctx.fillStyle = COLORS.textShadow;
+      ctx.fillText("點擊畫面重新開始", width / 2 + 2, height * 0.32 + 2);
+      ctx.fillStyle = COLORS.text;
+      ctx.fillText("點擊畫面重新開始", width / 2, height * 0.32);
+    }
   }
 
   function drawCenterMessage(title, subtitle) {
@@ -1202,7 +1249,9 @@
     } else if (state === "gameover") {
       drawCenterMessage(
         "Game Over",
-        `分數 ${score} / 最高分 ${highScore}　・　點擊或空白鍵重開`
+        birdSettledAfterDeath
+          ? `分數 ${score} / 最高分 ${highScore}　・　點擊或空白鍵重開`
+          : `分數 ${score} / 最高分 ${highScore}`
       );
     } else if (state === "easter_end") {
       drawEasterEnding();
@@ -1214,10 +1263,19 @@
     drawClouds();
     drawPipes();
     drawGround();
-    drawBird();
-    drawParticles();
-    drawScore();
-    drawHUDOverlays();
+
+    if (state !== "easter_end") {
+      drawBird();
+      drawParticles();
+      drawScore();
+    } else {
+      drawEasterEnding();
+    }
+
+    if (state !== "easter_end") {
+      drawHUDOverlays();
+    }
+
     drawSoundButton();
   }
 
@@ -1359,7 +1417,7 @@
       audioContext.resume();
     }
 
-    if (!bgmStarted) {
+    if (!bgmStarted && !easterBgmActive) {
       startBackgroundMusic();
       bgmStarted = true;
     }
@@ -1379,33 +1437,31 @@
       clearInterval(musicSchedulerLookAhead);
       musicSchedulerLookAhead = null;
     }
+
     easterBgmActive = false;
+
     easterBgmNodes.forEach((node) => {
       try {
         if (node.stop) node.stop();
       } catch (_) {}
     });
     easterBgmNodes = [];
-    if (audioContext && bgmStarted && !musicSchedulerLookAhead && state !== "easter_end") {
-      startBackgroundMusic();
-    }
   }
 
   function startEasterEndingMusic() {
     if (!audioContext) return;
-    if (easterBgmActive) return;
 
-    if (musicSchedulerLookAhead) {
-      clearInterval(musicSchedulerLookAhead);
-      musicSchedulerLookAhead = null;
-    }
-
+    stopEasterEndingMusic();
     easterBgmActive = true;
-    scheduleAwkwardLoop(audioContext.currentTime + 0.05);
+
+    let phraseStart = audioContext.currentTime + 0.05;
+    scheduleAwkwardLoop(phraseStart);
+    phraseStart += 2.0;
+    scheduleAwkwardLoop(phraseStart);
 
     musicSchedulerLookAhead = setInterval(() => {
       if (!audioContext || !easterBgmActive) return;
-      scheduleAwkwardLoop(audioContext.currentTime + 0.45);
+      scheduleAwkwardLoop(audioContext.currentTime + 0.8);
     }, 1600);
   }
 
@@ -1413,40 +1469,50 @@
     if (!audioContext || !masterGain) return;
 
     const notes = [
-      { f: 329.63, d: 0.18 },
-      { f: 311.13, d: 0.18 },
-      { f: 329.63, d: 0.18 },
-      { f: 246.94, d: 0.36 },
-      { f: 0, d: 0.10 },
-      { f: 246.94, d: 0.18 },
-      { f: 261.63, d: 0.18 },
-      { f: 246.94, d: 0.48 }
+      { f: 261.63, d: 0.22 },
+      { f: 277.18, d: 0.18 },
+      { f: 261.63, d: 0.16 },
+      { f: 220.00, d: 0.42 },
+      { f: 0, d: 0.08 },
+      { f: 220.00, d: 0.16 },
+      { f: 233.08, d: 0.16 },
+      { f: 220.00, d: 0.50 }
     ];
 
     let t = start;
+
     for (const note of notes) {
       if (note.f > 0) {
         const osc = audioContext.createOscillator();
+        const osc2 = audioContext.createOscillator();
         const gain = audioContext.createGain();
         const filter = audioContext.createBiquadFilter();
 
         osc.type = "triangle";
+        osc2.type = "square";
+
         osc.frequency.setValueAtTime(note.f, t);
+        osc2.frequency.setValueAtTime(note.f * 1.007, t);
+
         filter.type = "lowpass";
-        filter.frequency.setValueAtTime(1400, t);
+        filter.frequency.setValueAtTime(1200, t);
 
         gain.gain.setValueAtTime(0.0001, t);
-        gain.gain.linearRampToValueAtTime(0.035, t + 0.01);
-        gain.gain.linearRampToValueAtTime(0.022, t + note.d * 0.55);
+        gain.gain.linearRampToValueAtTime(0.03, t + 0.01);
+        gain.gain.linearRampToValueAtTime(0.02, t + note.d * 0.45);
         gain.gain.linearRampToValueAtTime(0.0001, t + note.d);
 
         osc.connect(filter);
+        osc2.connect(filter);
         filter.connect(gain);
         gain.connect(masterGain);
 
         osc.start(t);
+        osc2.start(t);
         osc.stop(t + note.d + 0.02);
-        easterBgmNodes.push(osc);
+        osc2.stop(t + note.d + 0.02);
+
+        easterBgmNodes.push(osc, osc2);
       }
       t += note.d;
     }
