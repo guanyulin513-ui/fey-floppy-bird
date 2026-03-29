@@ -31,8 +31,8 @@
 
     buttonBg: "rgba(255,255,255,0.18)",
     buttonBorder: "rgba(255,255,255,0.42)",
-    buttonOff: "rgba(255,120,120,0.9)",
-    buttonOnGlow: "rgba(255,255,255,0.22)"
+    buttonOff: "rgba(255,120,120,0.92)",
+    buttonOnGlow: "rgba(255,255,255,0.28)"
   };
 
   const CM = {
@@ -91,6 +91,7 @@
   let birdSettledAfterDeath = false;
   let deathPose = "none";
   let soundEnabled = true;
+  let suppressNextClick = false;
 
   let audioContext = null;
   let masterGain = null;
@@ -301,7 +302,11 @@
   function toggleSound() {
     soundEnabled = !soundEnabled;
     ensureAudio();
-    updateMasterGain();
+    if (masterGain && audioContext) {
+      const now = audioContext.currentTime;
+      masterGain.gain.cancelScheduledValues(now);
+      masterGain.gain.setValueAtTime(soundEnabled ? 0.18 : 0.0001, now);
+    }
   }
 
   function triggerAction() {
@@ -333,25 +338,25 @@
   }
 
   function spawnDirtBurst(x, y, strength, embed = false) {
-    const count = embed ? 34 : 24;
-    const baseSpeed = embed ? 1.65 : 1.15;
+    const count = embed ? 38 : 28;
+    const baseSpeed = embed ? 1.85 : 1.25;
 
     for (let i = 0; i < count; i++) {
       const angle = rand(-Math.PI * 0.98, -Math.PI * 0.02);
-      const speed = cmToPx(baseSpeed * rand(0.55, 1.25) * Math.max(0.75, strength));
+      const speed = cmToPx(baseSpeed * rand(0.55, 1.3) * Math.max(0.8, strength));
       dirtParticles.push({
         x,
         y,
-        vx: Math.cos(angle) * speed * rand(0.8, 1.35),
-        vy: Math.sin(angle) * speed * rand(0.8, 1.35),
-        life: rand(0.42, 0.78),
-        maxLife: rand(0.42, 0.78),
-        size: rand(cmToPx(0.02), cmToPx(0.05)),
+        vx: Math.cos(angle) * speed * rand(0.85, 1.4),
+        vy: Math.sin(angle) * speed * rand(0.85, 1.4),
+        life: rand(0.48, 0.82),
+        maxLife: rand(0.48, 0.82),
+        size: rand(cmToPx(0.025), cmToPx(0.06)),
         color: [
           COLORS.groundSoil,
           COLORS.groundShadow,
-          "#E0B84D",
-          "#B8860B"
+          "#E2BD5A",
+          "#C8931B"
         ][Math.floor(Math.random() * 4)]
       });
     }
@@ -925,16 +930,6 @@
     }
   }
 
-  function drawParticles() {
-    for (const p of dirtParticles) {
-      const alpha = clamp(p.life / p.maxLife, 0, 1);
-      ctx.globalAlpha = alpha;
-      ctx.fillStyle = p.color;
-      ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
-    }
-    ctx.globalAlpha = 1;
-  }
-
   function drawBird() {
     const bodySize = bird.size;
     const x = bird.x;
@@ -993,6 +988,16 @@
     ctx.fill();
 
     ctx.restore();
+  }
+
+  function drawParticles() {
+    for (const p of dirtParticles) {
+      const alpha = clamp(p.life / p.maxLife, 0, 1);
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+    }
+    ctx.globalAlpha = 1;
   }
 
   function drawScore() {
@@ -1112,11 +1117,11 @@
     drawClouds();
     drawPipes();
     drawGround();
-    drawParticles();
     drawBird();
+    drawParticles();   // 改到鳥前面
     drawScore();
-    drawSoundButton();
     drawHUDOverlays();
+    drawSoundButton(); // 永遠畫最上層
   }
 
   function frame(timestamp) {
@@ -1130,6 +1135,21 @@
     requestAnimationFrame(frame);
   }
 
+  function handleCanvasPress(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+
+    ensureAudio();
+
+    if (pointInRect(x, y, getSoundButtonRect())) {
+      toggleSound();
+      return;
+    }
+
+    triggerAction();
+  }
+
   function bindEvents() {
     window.addEventListener("resize", resize);
 
@@ -1140,18 +1160,21 @@
       }
     });
 
-    canvas.addEventListener("pointerdown", (event) => {
+    canvas.addEventListener("click", (event) => {
       event.preventDefault();
-      ensureAudio();
-
-      const pos = getPointerPos(event);
-      if (pointInRect(pos.x, pos.y, getSoundButtonRect())) {
-        toggleSound();
-        return;
-      }
-
-      triggerAction();
+      handleCanvasPress(event.clientX, event.clientY);
     });
+
+    canvas.addEventListener(
+      "touchstart",
+      (event) => {
+        event.preventDefault();
+        const touch = event.changedTouches[0];
+        if (!touch) return;
+        handleCanvasPress(touch.clientX, touch.clientY);
+      },
+      { passive: false }
+    );
 
     window.addEventListener("keydown", ensureAudio);
   }
@@ -1162,7 +1185,6 @@
       if (!AudioCtx) return;
 
       audioContext = new AudioCtx();
-
       masterGain = audioContext.createGain();
       masterGain.gain.value = soundEnabled ? 0.18 : 0.0001;
       masterGain.connect(audioContext.destination);
@@ -1184,15 +1206,13 @@
     if (!masterGain || !audioContext) return;
     const now = audioContext.currentTime;
     masterGain.gain.cancelScheduledValues(now);
-    masterGain.gain.setValueAtTime(masterGain.gain.value, now);
-    masterGain.gain.linearRampToValueAtTime(soundEnabled ? 0.18 : 0.0001, now + 0.03);
+    masterGain.gain.setValueAtTime(soundEnabled ? 0.18 : 0.0001, now);
   }
 
   function playFlapSound() {
     if (!audioContext || !masterGain || !soundEnabled) return;
 
     const now = audioContext.currentTime;
-
     const osc1 = audioContext.createOscillator();
     const osc2 = audioContext.createOscillator();
     const gain = audioContext.createGain();
@@ -1229,7 +1249,6 @@
     if (!audioContext || !masterGain || !soundEnabled) return;
 
     const now = audioContext.currentTime;
-
     const osc = audioContext.createOscillator();
     const gain = audioContext.createGain();
     const filter = audioContext.createBiquadFilter();
