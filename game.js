@@ -31,7 +31,8 @@
 
     buttonBg: "rgba(255,255,255,0.18)",
     buttonBorder: "rgba(255,255,255,0.42)",
-    buttonOff: "rgba(255,120,120,0.85)"
+    buttonOff: "rgba(255,120,120,0.9)",
+    buttonOnGlow: "rgba(255,255,255,0.22)"
   };
 
   const CM = {
@@ -74,7 +75,7 @@
   let height = 0;
   let scale = 0;
 
-  let state = "ready"; // ready | playing | gameover
+  let state = "ready";
   let lastTime = 0;
   let elapsedGameTime = 0;
 
@@ -88,9 +89,8 @@
   let dirtParticles = [];
 
   let birdSettledAfterDeath = false;
-  let deathPose = "none"; // none | bounce | embed | pipe
+  let deathPose = "none";
   let soundEnabled = true;
-  let suppressNextGameAction = false;
 
   let audioContext = null;
   let masterGain = null;
@@ -333,21 +333,26 @@
   }
 
   function spawnDirtBurst(x, y, strength, embed = false) {
-    const count = embed ? 18 : 12;
-    const baseSpeed = embed ? 1.0 : 0.75;
+    const count = embed ? 34 : 24;
+    const baseSpeed = embed ? 1.65 : 1.15;
 
     for (let i = 0; i < count; i++) {
-      const angle = rand(-Math.PI * 0.92, -Math.PI * 0.08);
-      const speed = cmToPx(baseSpeed * rand(0.35, 0.95) * Math.max(0.65, strength));
+      const angle = rand(-Math.PI * 0.98, -Math.PI * 0.02);
+      const speed = cmToPx(baseSpeed * rand(0.55, 1.25) * Math.max(0.75, strength));
       dirtParticles.push({
         x,
         y,
-        vx: Math.cos(angle) * speed * rand(0.65, 1.15),
-        vy: Math.sin(angle) * speed * rand(0.65, 1.15),
-        life: rand(0.28, 0.48),
-        maxLife: rand(0.28, 0.48),
-        size: rand(cmToPx(0.012), cmToPx(0.03)),
-        color: Math.random() < 0.5 ? COLORS.groundSoil : COLORS.groundShadow
+        vx: Math.cos(angle) * speed * rand(0.8, 1.35),
+        vy: Math.sin(angle) * speed * rand(0.8, 1.35),
+        life: rand(0.42, 0.78),
+        maxLife: rand(0.42, 0.78),
+        size: rand(cmToPx(0.02), cmToPx(0.05)),
+        color: [
+          COLORS.groundSoil,
+          COLORS.groundShadow,
+          "#E0B84D",
+          "#B8860B"
+        ][Math.floor(Math.random() * 4)]
       });
     }
   }
@@ -361,15 +366,15 @@
         continue;
       }
 
-      p.vy += cmToPx(4.8) * dt;
+      p.vy += cmToPx(5.2) * dt;
       p.x += p.vx * dt;
       p.y += p.vy * dt;
 
       const groundTop = height - cmToPx(CM.groundHeight);
       if (p.y >= groundTop - p.size) {
         p.y = groundTop - p.size;
-        p.vx *= 0.72;
-        p.vy *= -0.18;
+        p.vx *= 0.76;
+        p.vy *= -0.16;
       }
     }
   }
@@ -506,7 +511,6 @@
   }
 
   function resolveDeathCollision(prevX, prevY, groundTop) {
-    // 多次迭代，避免同一幀內連續碰撞漏判
     for (let i = 0; i < 4; i++) {
       const prevBox = getBirdBoxAt(prevX, prevY);
       const box = getBirdBoxAt(bird.x, bird.y);
@@ -563,7 +567,7 @@
       bird.angle = Math.max(bird.angle, 1.22);
       birdSettledAfterDeath = true;
       deathPose = "embed";
-      spawnDirtBurst(bird.x + bird.size * 0.18, groundTop, Math.min(1.45, speedCm), true);
+      spawnDirtBurst(bird.x + bird.size * 0.18, groundTop, Math.min(1.6, speedCm), true);
       playGroundThudSound();
       return;
     }
@@ -574,7 +578,7 @@
     bird.velocityX *= PHYSICS.tangentialFriction;
     bird.angle = Math.max(0.55, bird.angle * 0.72);
     deathPose = "bounce";
-    spawnDirtBurst(bird.x + bird.size * 0.12, groundTop, Math.min(1.15, speedCm), false);
+    spawnDirtBurst(bird.x + bird.size * 0.12, groundTop, Math.min(1.3, speedCm), false);
     playGroundBounceSound();
 
     if (
@@ -1018,7 +1022,7 @@
   function drawSoundButton() {
     const rect = getSoundButtonRect();
 
-    ctx.fillStyle = COLORS.buttonBg;
+    ctx.fillStyle = soundEnabled ? COLORS.buttonOnGlow : COLORS.buttonBg;
     ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
 
     ctx.strokeStyle = COLORS.buttonBorder;
@@ -1132,22 +1136,16 @@
     window.addEventListener("keydown", (event) => {
       if (event.code === "Space") {
         event.preventDefault();
-
-        if (suppressNextGameAction) {
-          suppressNextGameAction = false;
-          return;
-        }
-
         triggerAction();
       }
     });
 
     canvas.addEventListener("pointerdown", (event) => {
       event.preventDefault();
+      ensureAudio();
 
       const pos = getPointerPos(event);
       if (pointInRect(pos.x, pos.y, getSoundButtonRect())) {
-        suppressNextGameAction = true;
         toggleSound();
         return;
       }
@@ -1155,33 +1153,6 @@
       triggerAction();
     });
 
-    canvas.addEventListener(
-      "touchstart",
-      (event) => {
-        event.preventDefault();
-
-        const touch = event.changedTouches[0];
-        if (!touch) {
-          triggerAction();
-          return;
-        }
-
-        const rect = canvas.getBoundingClientRect();
-        const x = touch.clientX - rect.left;
-        const y = touch.clientY - rect.top;
-
-        if (pointInRect(x, y, getSoundButtonRect())) {
-          suppressNextGameAction = true;
-          toggleSound();
-          return;
-        }
-
-        triggerAction();
-      },
-      { passive: false }
-    );
-
-    window.addEventListener("pointerdown", ensureAudio, { passive: true });
     window.addEventListener("keydown", ensureAudio);
   }
 
@@ -1214,7 +1185,7 @@
     const now = audioContext.currentTime;
     masterGain.gain.cancelScheduledValues(now);
     masterGain.gain.setValueAtTime(masterGain.gain.value, now);
-    masterGain.gain.linearRampToValueAtTime(soundEnabled ? 0.18 : 0.0001, now + 0.04);
+    masterGain.gain.linearRampToValueAtTime(soundEnabled ? 0.18 : 0.0001, now + 0.03);
   }
 
   function playFlapSound() {
