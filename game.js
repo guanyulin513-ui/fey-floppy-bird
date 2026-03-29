@@ -75,6 +75,8 @@
     swipeMinDistance: 55,
     swipeMaxOffAxis: 48,
     swipeWindowMs: 1400,
+    tapMaxDistance: 14,
+    tapMaxDurationMs: 260,
     reverseFlightSpeedCm: 1.25,
     reverseReturnThresholdPx: 8,
     offscreenFlightSpeedCm: 1.75
@@ -106,10 +108,10 @@
   let bgmStarted = false;
   let nextMusicTime = 0;
   let musicSchedulerLookAhead = null;
+  let easterBgmActive = false;
+  let easterBgmNodes = [];
 
-  // Easter egg / world tracking
   let worldOffsetPx = 0;
-  let furthestWorldOffsetPx = 0;
   let reverseMode = false;
   let worldFrozenForExit = false;
   let leftSwipeTimes = [];
@@ -154,7 +156,6 @@
   }
 
   function initializeGameObjects() {
-    const previousState = state;
     const previousHighScore = highScore;
 
     bird = createBird();
@@ -163,40 +164,23 @@
     dirtParticles = [];
     groundOffsetPx = 0;
     worldOffsetPx = 0;
-    furthestWorldOffsetPx = 0;
     reverseMode = false;
     worldFrozenForExit = false;
     leftSwipeTimes = [];
+    pointerTracking = null;
     score = 0;
     elapsedGameTime = 0;
     birdSettledAfterDeath = false;
     deathPose = "none";
     highScore = previousHighScore;
-    state =
-      previousState === "gameover" || previousState === "easter_end"
-        ? "ready"
-        : previousState;
+    state = "ready";
 
+    stopEasterEndingMusic();
     createInitialPipes();
   }
 
   function resetGame() {
-    state = "ready";
-    bird = createBird();
-    pipes = [];
-    clouds = createClouds();
-    dirtParticles = [];
-    groundOffsetPx = 0;
-    worldOffsetPx = 0;
-    furthestWorldOffsetPx = 0;
-    reverseMode = false;
-    worldFrozenForExit = false;
-    leftSwipeTimes = [];
-    score = 0;
-    elapsedGameTime = 0;
-    birdSettledAfterDeath = false;
-    deathPose = "none";
-    createInitialPipes();
+    initializeGameObjects();
   }
 
   function createBird() {
@@ -273,8 +257,7 @@
       width: pipeWidth,
       gapTop,
       gapHeight,
-      scoredForward: false,
-      crossedBackward: false
+      scoredForward: false
     };
   }
 
@@ -287,10 +270,7 @@
       pipes.push(createPipe(worldOffsetPx + width + cmToPx(0.8)));
     }
 
-    while (
-      pipes.length < 4 ||
-      pipes[pipes.length - 1].worldX < minRightWorldX
-    ) {
+    while (pipes.length < 4 || pipes[pipes.length - 1].worldX < minRightWorldX) {
       const lastPipe = pipes[pipes.length - 1];
       const nextX = lastPipe.worldX + pipeWidthPx + spacingPx;
       pipes.push(createPipe(nextX));
@@ -329,22 +309,10 @@
     return px >= rect.x && px <= rect.x + rect.w && py >= rect.y && py <= rect.y + rect.h;
   }
 
-  function getPointerPos(event) {
-    const rect = canvas.getBoundingClientRect();
-    return {
-      x: event.clientX - rect.left,
-      y: event.clientY - rect.top
-    };
-  }
-
   function toggleSound() {
     soundEnabled = !soundEnabled;
     ensureAudio();
-    if (masterGain && audioContext) {
-      const now = audioContext.currentTime;
-      masterGain.gain.cancelScheduledValues(now);
-      masterGain.gain.setValueAtTime(soundEnabled ? 0.18 : 0.0001, now);
-    }
+    updateMasterGain();
   }
 
   function triggerAction() {
@@ -385,9 +353,7 @@
     const now = performance.now();
 
     if (dx < 0) {
-      leftSwipeTimes = leftSwipeTimes.filter(
-        (t) => now - t <= EASTER.swipeWindowMs
-      );
+      leftSwipeTimes = leftSwipeTimes.filter((t) => now - t <= EASTER.swipeWindowMs);
       leftSwipeTimes.push(now);
       if (leftSwipeTimes.length >= 3) {
         enterReverseMode();
@@ -482,11 +448,8 @@
       bird.y += bird.velocityY * dt;
 
       if (reverseMode) {
-        bird.angle = lerp(
-          0.6,
-          -1.2,
-          clamp((-bird.velocityY) / maxFallSpeedPx, -1, 1) * 0.5 + 0.5
-        );
+        const t = clamp(bird.velocityY / maxFallSpeedPx, -1, 1);
+        bird.angle = lerp(0.6, -1.2, (t + 1) / 2);
       } else {
         const t = clamp(bird.velocityY / maxFallSpeedPx, -1, 1);
         bird.angle = lerp(-0.6, 1.2, (t + 1) / 2);
@@ -563,17 +526,13 @@
         box.right > topRect.left &&
         box.left < topRect.right &&
         Math.abs(box.top - topRect.bottom) < 1.5
-      ) {
-        return true;
-      }
+      ) return true;
 
       if (
         box.right > bottomRect.left &&
         box.left < bottomRect.right &&
         Math.abs(box.bottom - bottomRect.top) < 1.5
-      ) {
-        return true;
-      }
+      ) return true;
     }
 
     return false;
@@ -585,7 +544,7 @@
       const box = getBirdBoxAt(bird.x, bird.y);
 
       if (box.bottom >= groundTop) {
-        resolveGroundImpact(box, groundTop);
+        resolveGroundImpact(groundTop);
         if (birdSettledAfterDeath) return;
       }
 
@@ -622,7 +581,7 @@
     }
   }
 
-  function resolveGroundImpact(box, groundTop) {
+  function resolveGroundImpact(groundTop) {
     const speedCm = Math.abs(bird.velocityY) / scale;
     const downwardFacing = bird.angle > 1.02;
     const hardImpact = speedCm > 1.35;
@@ -704,11 +663,7 @@
       bird.velocityX *= PHYSICS.tangentialFriction;
       bird.angle = Math.max(0.8, bird.angle * 0.8);
       deathPose = "pipe";
-      if (Math.abs(bird.velocityY) > PHYSICS.settleVerticalPx) {
-        playPipeBounceSound();
-      } else {
-        playPipeHitSound();
-      }
+      Math.abs(bird.velocityY) > PHYSICS.settleVerticalPx ? playPipeBounceSound() : playPipeHitSound();
       return true;
     }
 
@@ -728,11 +683,7 @@
       bird.velocityY *= 0.92;
       bird.angle = 1.16;
       deathPose = "pipe";
-      if (Math.abs(bird.velocityX) > PHYSICS.settleSpeedPx) {
-        playPipeBounceSound();
-      } else {
-        playPipeHitSound();
-      }
+      Math.abs(bird.velocityX) > PHYSICS.settleSpeedPx ? playPipeBounceSound() : playPipeHitSound();
       return true;
     }
 
@@ -742,11 +693,7 @@
       bird.velocityY *= 0.92;
       bird.angle = 1.16;
       deathPose = "pipe";
-      if (Math.abs(bird.velocityX) > PHYSICS.settleSpeedPx) {
-        playPipeBounceSound();
-      } else {
-        playPipeHitSound();
-      }
+      Math.abs(bird.velocityX) > PHYSICS.settleSpeedPx ? playPipeBounceSound() : playPipeHitSound();
       return true;
     }
 
@@ -755,14 +702,16 @@
 
   function updateClouds(dt, sceneSpeedPxPerSec) {
     if (state !== "playing") return;
-
     if (worldFrozenForExit) return;
 
     for (const cloud of clouds) {
-      cloud.x -= sceneSpeedPxPerSec * cloud.speedFactor * dt;
+      cloud.x -= sceneSpeedPxPerSec * cloud.speedFactor * dt * (reverseMode ? -1 : 1);
 
-      if (cloud.x + cloud.size * 2 < 0) {
+      if (cloud.x + cloud.size * 2 < -40) {
         cloud.x = width + Math.random() * 100;
+        cloud.y = height * (0.08 + Math.random() * 0.28);
+      } else if (cloud.x - cloud.size * 2 > width + 40) {
+        cloud.x = -Math.random() * 100;
         cloud.y = height * (0.08 + Math.random() * 0.28);
       }
     }
@@ -771,8 +720,8 @@
   function updatePipes(dt, sceneSpeedPxPerSec) {
     if (state !== "playing") return;
 
-    const birdLine = bird.x;
     const previousWorldOffset = worldOffsetPx;
+    const birdLine = bird.x;
 
     if (reverseMode) {
       if (!worldFrozenForExit) {
@@ -787,24 +736,21 @@
         bird.x -= cmToPx(EASTER.offscreenFlightSpeedCm) * dt;
         if (bird.x + bird.size / 2 < 0) {
           state = "easter_end";
+          startEasterEndingMusic();
         }
       }
     } else {
       const moveX = sceneSpeedPxPerSec * dt;
       worldOffsetPx += moveX;
-      furthestWorldOffsetPx = Math.max(furthestWorldOffsetPx, worldOffsetPx);
     }
 
     if (!reverseMode) {
       for (const pipe of pipes) {
-        const prevScreenX = pipe.worldX - previousWorldOffset;
-        const currScreenX = pipe.worldX - worldOffsetPx;
-        const prevLine = prevScreenX + pipe.width;
-        const currLine = currScreenX + pipe.width;
+        const prevLine = pipe.worldX - previousWorldOffset + pipe.width;
+        const currLine = pipe.worldX - worldOffsetPx + pipe.width;
 
         if (!pipe.scoredForward && prevLine >= birdLine && currLine < birdLine) {
           pipe.scoredForward = true;
-          pipe.crossedBackward = false;
           score += 1;
           if (score > highScore) {
             highScore = score;
@@ -968,32 +914,12 @@
     );
 
     ctx.fillStyle = COLORS.pipeDark;
-    ctx.fillRect(
-      x - capOverhang,
-      pipe.gapTop - capHeight,
-      pipe.width + capOverhang * 2,
-      capHeight
-    );
-    ctx.fillRect(
-      x - capOverhang,
-      pipe.gapTop + pipe.gapHeight,
-      pipe.width + capOverhang * 2,
-      capHeight
-    );
+    ctx.fillRect(x - capOverhang, pipe.gapTop - capHeight, pipe.width + capOverhang * 2, capHeight);
+    ctx.fillRect(x - capOverhang, pipe.gapTop + pipe.gapHeight, pipe.width + capOverhang * 2, capHeight);
 
     ctx.fillStyle = COLORS.pipeHighlight;
-    ctx.fillRect(
-      x - capOverhang,
-      pipe.gapTop - capHeight,
-      pipe.width * 0.25,
-      capHeight
-    );
-    ctx.fillRect(
-      x - capOverhang,
-      pipe.gapTop + pipe.gapHeight,
-      pipe.width * 0.25,
-      capHeight
-    );
+    ctx.fillRect(x - capOverhang, pipe.gapTop - capHeight, pipe.width * 0.25, capHeight);
+    ctx.fillRect(x - capOverhang, pipe.gapTop + pipe.gapHeight, pipe.width * 0.25, capHeight);
   }
 
   function drawPipeSegment(x, y, w, h) {
@@ -1028,24 +954,14 @@
     ctx.fillRect(0, groundTop + grassHeight, width, groundHeight - grassHeight);
 
     ctx.fillStyle = COLORS.groundShadow;
-    ctx.fillRect(
-      0,
-      groundTop + grassHeight + (groundHeight - grassHeight) * 0.58,
-      width,
-      (groundHeight - grassHeight) * 0.42
-    );
+    ctx.fillRect(0, groundTop + grassHeight + (groundHeight - grassHeight) * 0.58, width, (groundHeight - grassHeight) * 0.42);
 
     for (let x = groundOffsetPx - stripeWidth; x < width + stripeWidth; x += stripeWidth) {
       ctx.fillStyle = "rgba(255,255,255,0.12)";
       ctx.fillRect(x, groundTop, stripeWidth * 0.45, grassHeight * 0.28);
 
       ctx.fillStyle = "rgba(0,0,0,0.10)";
-      ctx.fillRect(
-        x + stripeWidth * 0.5,
-        groundTop + grassHeight,
-        stripeWidth * 0.45,
-        groundHeight * 0.25
-      );
+      ctx.fillRect(x + stripeWidth * 0.5, groundTop + grassHeight, stripeWidth * 0.45, groundHeight * 0.25);
     }
   }
 
@@ -1073,12 +989,7 @@
     ctx.rotate(bird.angle);
 
     ctx.fillStyle = COLORS.birdShadow;
-    ctx.fillRect(
-      -bodySize / 2 + bodySize * 0.08,
-      -bodySize / 2 + bodySize * 0.08,
-      bodySize,
-      bodySize
-    );
+    ctx.fillRect(-bodySize / 2 + bodySize * 0.08, -bodySize / 2 + bodySize * 0.08, bodySize, bodySize);
 
     ctx.fillStyle = COLORS.birdBody;
     ctx.fillRect(-bodySize / 2, -bodySize / 2, bodySize, bodySize);
@@ -1321,7 +1232,7 @@
     requestAnimationFrame(frame);
   }
 
-  function handleCanvasPress(clientX, clientY) {
+  function handleTap(clientX, clientY) {
     const rect = canvas.getBoundingClientRect();
     const x = clientX - rect.left;
     const y = clientY - rect.top;
@@ -1346,9 +1257,33 @@
       }
     });
 
-    canvas.addEventListener("click", (event) => {
-      event.preventDefault();
-      handleCanvasPress(event.clientX, event.clientY);
+    canvas.addEventListener("mousedown", (event) => {
+      pointerTracking = {
+        startX: event.clientX,
+        startY: event.clientY,
+        startTime: performance.now(),
+        pointerType: "mouse"
+      };
+    });
+
+    canvas.addEventListener("mouseup", (event) => {
+      if (!pointerTracking || pointerTracking.pointerType !== "mouse") return;
+
+      const dx = event.clientX - pointerTracking.startX;
+      const dy = event.clientY - pointerTracking.startY;
+      const dt = performance.now() - pointerTracking.startTime;
+
+      if (
+        Math.abs(dx) <= EASTER.tapMaxDistance &&
+        Math.abs(dy) <= EASTER.tapMaxDistance &&
+        dt <= EASTER.tapMaxDurationMs
+      ) {
+        handleTap(event.clientX, event.clientY);
+      } else {
+        registerSwipe(dx, dy);
+      }
+
+      pointerTracking = null;
     });
 
     canvas.addEventListener(
@@ -1358,21 +1293,12 @@
         const touch = event.changedTouches[0];
         if (!touch) return;
 
-        const rect = canvas.getBoundingClientRect();
-        const x = touch.clientX - rect.left;
-        const y = touch.clientY - rect.top;
-
-        const soundRect = getSoundButtonRect();
-        if (pointInRect(x, y, soundRect)) {
-          handleCanvasPress(touch.clientX, touch.clientY);
-          pointerTracking = null;
-          return;
-        }
-
         pointerTracking = {
           startX: touch.clientX,
           startY: touch.clientY,
-          id: touch.identifier
+          startTime: performance.now(),
+          touchId: touch.identifier,
+          pointerType: "touch"
         };
       },
       { passive: false }
@@ -1381,38 +1307,39 @@
     canvas.addEventListener(
       "touchend",
       (event) => {
-        if (!pointerTracking) return;
+        if (!pointerTracking || pointerTracking.pointerType !== "touch") return;
 
         for (const touch of event.changedTouches) {
-          if (touch.identifier === pointerTracking.id) {
-            const dx = touch.clientX - pointerTracking.startX;
-            const dy = touch.clientY - pointerTracking.startY;
+          if (touch.identifier !== pointerTracking.touchId) continue;
+
+          const dx = touch.clientX - pointerTracking.startX;
+          const dy = touch.clientY - pointerTracking.startY;
+          const dt = performance.now() - pointerTracking.startTime;
+
+          if (
+            Math.abs(dx) <= EASTER.tapMaxDistance &&
+            Math.abs(dy) <= EASTER.tapMaxDistance &&
+            dt <= EASTER.tapMaxDurationMs
+          ) {
+            handleTap(touch.clientX, touch.clientY);
+          } else {
             registerSwipe(dx, dy);
-            pointerTracking = null;
-            break;
           }
+
+          pointerTracking = null;
+          break;
         }
       },
       { passive: false }
     );
 
-    canvas.addEventListener("mousedown", (event) => {
-      const pos = getPointerPos(event);
-      if (pointInRect(pos.x, pos.y, getSoundButtonRect())) return;
-      pointerTracking = {
-        startX: event.clientX,
-        startY: event.clientY,
-        id: "mouse"
-      };
-    });
-
-    canvas.addEventListener("mouseup", (event) => {
-      if (!pointerTracking || pointerTracking.id !== "mouse") return;
-      const dx = event.clientX - pointerTracking.startX;
-      const dy = event.clientY - pointerTracking.startY;
-      registerSwipe(dx, dy);
-      pointerTracking = null;
-    });
+    canvas.addEventListener(
+      "touchcancel",
+      () => {
+        pointerTracking = null;
+      },
+      { passive: false }
+    );
 
     window.addEventListener("keydown", ensureAudio);
   }
@@ -1445,6 +1372,84 @@
     const now = audioContext.currentTime;
     masterGain.gain.cancelScheduledValues(now);
     masterGain.gain.setValueAtTime(soundEnabled ? 0.18 : 0.0001, now);
+  }
+
+  function stopEasterEndingMusic() {
+    if (musicSchedulerLookAhead) {
+      clearInterval(musicSchedulerLookAhead);
+      musicSchedulerLookAhead = null;
+    }
+    easterBgmActive = false;
+    easterBgmNodes.forEach((node) => {
+      try {
+        if (node.stop) node.stop();
+      } catch (_) {}
+    });
+    easterBgmNodes = [];
+    if (audioContext && bgmStarted && !musicSchedulerLookAhead && state !== "easter_end") {
+      startBackgroundMusic();
+    }
+  }
+
+  function startEasterEndingMusic() {
+    if (!audioContext) return;
+    if (easterBgmActive) return;
+
+    if (musicSchedulerLookAhead) {
+      clearInterval(musicSchedulerLookAhead);
+      musicSchedulerLookAhead = null;
+    }
+
+    easterBgmActive = true;
+    scheduleAwkwardLoop(audioContext.currentTime + 0.05);
+
+    musicSchedulerLookAhead = setInterval(() => {
+      if (!audioContext || !easterBgmActive) return;
+      scheduleAwkwardLoop(audioContext.currentTime + 0.45);
+    }, 1600);
+  }
+
+  function scheduleAwkwardLoop(start) {
+    if (!audioContext || !masterGain) return;
+
+    const notes = [
+      { f: 329.63, d: 0.18 },
+      { f: 311.13, d: 0.18 },
+      { f: 329.63, d: 0.18 },
+      { f: 246.94, d: 0.36 },
+      { f: 0, d: 0.10 },
+      { f: 246.94, d: 0.18 },
+      { f: 261.63, d: 0.18 },
+      { f: 246.94, d: 0.48 }
+    ];
+
+    let t = start;
+    for (const note of notes) {
+      if (note.f > 0) {
+        const osc = audioContext.createOscillator();
+        const gain = audioContext.createGain();
+        const filter = audioContext.createBiquadFilter();
+
+        osc.type = "triangle";
+        osc.frequency.setValueAtTime(note.f, t);
+        filter.type = "lowpass";
+        filter.frequency.setValueAtTime(1400, t);
+
+        gain.gain.setValueAtTime(0.0001, t);
+        gain.gain.linearRampToValueAtTime(0.035, t + 0.01);
+        gain.gain.linearRampToValueAtTime(0.022, t + note.d * 0.55);
+        gain.gain.linearRampToValueAtTime(0.0001, t + note.d);
+
+        osc.connect(filter);
+        filter.connect(gain);
+        gain.connect(masterGain);
+
+        osc.start(t);
+        osc.stop(t + note.d + 0.02);
+        easterBgmNodes.push(osc);
+      }
+      t += note.d;
+    }
   }
 
   function playFlapSound() {
@@ -1733,13 +1738,14 @@
 
   function startBackgroundMusic() {
     if (!audioContext) return;
+    if (easterBgmActive) return;
 
     nextMusicTime = audioContext.currentTime + 0.08;
     scheduleMusicChunk();
     scheduleMusicChunk();
 
     musicSchedulerLookAhead = setInterval(() => {
-      if (!audioContext) return;
+      if (!audioContext || easterBgmActive) return;
       while (nextMusicTime < audioContext.currentTime + 1.2) {
         scheduleMusicChunk();
       }
