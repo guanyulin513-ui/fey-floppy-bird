@@ -80,14 +80,18 @@
     reverseFlightSpeedCm: 1.25,
     reverseReturnThresholdPx: 8,
     offscreenFlightSpeedCm: 1.75,
-    endingBirdSpeedCm: 0.62
+    endingBirdSpeedCm: 0.62,
+    endingSkipThresholdRatio: 0.55,
+
+    drillChance: 0.1,
+    drillLockSeconds: 3
   };
 
   let width = 0;
   let height = 0;
   let scale = 0;
 
-  let state = "ready"; // ready | playing | gameover | easter_end
+  let state = "ready"; // ready | playing | gameover | easter_end | drill_end
   let lastTime = 0;
   let elapsedGameTime = 0;
 
@@ -99,6 +103,7 @@
   let clouds = [];
   let groundOffsetPx = 0;
   let dirtParticles = [];
+  let dirtMounds = [];
 
   let birdSettledAfterDeath = false;
   let deathPose = "none";
@@ -114,6 +119,14 @@
   let easterBgmNodes = [];
   let easterEndingReadyToReset = false;
   let easterEndingBird = null;
+
+  let drillBgmActive = false;
+  let drillStartTime = 0;
+  let drillReadyToReset = false;
+  let drillDepth = 0;
+  let drillRotation = 0;
+  let drillTriggeredByNoInput = false;
+  let anyInputSinceStart = false;
 
   let worldOffsetPx = 0;
   let reverseMode = false;
@@ -166,6 +179,7 @@
     pipes = [];
     clouds = createClouds();
     dirtParticles = [];
+    dirtMounds = [];
     groundOffsetPx = 0;
 
     worldOffsetPx = 0;
@@ -184,8 +198,15 @@
 
     easterEndingBird = null;
     easterEndingReadyToReset = false;
-    stopEasterEndingMusic();
 
+    drillStartTime = 0;
+    drillReadyToReset = false;
+    drillDepth = 0;
+    drillRotation = 0;
+    drillTriggeredByNoInput = false;
+    anyInputSinceStart = false;
+
+    stopSpecialMusic();
     createInitialPipes();
   }
 
@@ -234,12 +255,10 @@
       const t = smoothstep01(currentScore / 20);
       return lerp(CM.minPipeSpacing, CM.midPipeSpacing, t);
     }
-
     if (currentScore <= 30) {
       const t = smoothstep01((currentScore - 20) / 10);
       return lerp(CM.midPipeSpacing, CM.maxPipeSpacing, t);
     }
-
     const extra = 1 - Math.exp(-(currentScore - 30) / 25);
     return lerp(CM.maxPipeSpacing, CM.maxPipeSpacing + 0.45, extra);
   }
@@ -296,7 +315,7 @@
   }
 
   function flapBird() {
-    if (state === "gameover" || state === "easter_end") return;
+    if (state === "gameover" || state === "easter_end" || state === "drill_end") return;
     bird.velocityY = cmToPx(CM.jumpImpulse);
     playFlapSound();
   }
@@ -316,6 +335,12 @@
     return px >= rect.x && px <= rect.x + rect.w && py >= rect.y && py <= rect.y + rect.h;
   }
 
+  function markUserInput() {
+    if (state === "playing") {
+      anyInputSinceStart = true;
+    }
+  }
+
   function toggleSound() {
     soundEnabled = !soundEnabled;
     ensureAudio();
@@ -326,11 +351,13 @@
     ensureAudio();
 
     if (state === "ready") {
+      markUserInput();
       startPlayingIfNeeded();
       return;
     }
 
     if (state === "playing") {
+      markUserInput();
       flapBird();
       return;
     }
@@ -343,6 +370,14 @@
 
     if (state === "easter_end") {
       if (!easterEndingReadyToReset) return;
+      resetGame();
+      return;
+    }
+
+    if (state === "drill_end") {
+      const elapsed = performance.now() / 1000 - drillStartTime;
+      if (elapsed < EASTER.drillLockSeconds) return;
+      if (!drillReadyToReset) return;
       resetGame();
     }
   }
@@ -367,6 +402,7 @@
     const now = performance.now();
 
     if (dx < 0) {
+      markUserInput();
       flapBird();
       leftSwipeTimes = leftSwipeTimes.filter((t) => now - t <= EASTER.swipeWindowMs);
       leftSwipeTimes.push(now);
@@ -375,6 +411,7 @@
         leftSwipeTimes = [];
       }
     } else if (dx > 0) {
+      markUserInput();
       leftSwipeTimes = [];
       if (reverseMode) {
         exitReverseMode();
@@ -392,21 +429,21 @@
     };
   }
 
-  function spawnDirtBurst(x, y, strength, embed = false) {
-    const count = embed ? 38 : 28;
-    const baseSpeed = embed ? 1.85 : 1.25;
+  function spawnDirtBurst(x, y, strength, embed = false, upwardBias = 1) {
+    const count = embed ? 42 : 30;
+    const baseSpeed = embed ? 1.95 : 1.30;
 
     for (let i = 0; i < count; i++) {
       const angle = rand(-Math.PI * 0.98, -Math.PI * 0.02);
-      const speed = cmToPx(baseSpeed * rand(0.55, 1.3) * Math.max(0.8, strength));
+      const speed = cmToPx(baseSpeed * rand(0.55, 1.35) * Math.max(0.8, strength));
       dirtParticles.push({
         x,
         y,
         vx: Math.cos(angle) * speed * rand(0.85, 1.4),
-        vy: Math.sin(angle) * speed * rand(0.85, 1.4),
-        life: rand(0.48, 0.82),
-        maxLife: rand(0.48, 0.82),
-        size: rand(cmToPx(0.025), cmToPx(0.06)),
+        vy: Math.sin(angle) * speed * rand(0.85, 1.4) * upwardBias,
+        life: rand(0.48, 0.9),
+        maxLife: rand(0.48, 0.9),
+        size: rand(cmToPx(0.025), cmToPx(0.07)),
         color: [
           COLORS.groundSoil,
           COLORS.groundShadow,
@@ -414,6 +451,33 @@
           "#C8931B"
         ][Math.floor(Math.random() * 4)]
       });
+    }
+  }
+
+  function spawnDrillDirt() {
+    const mouthX = bird.x;
+    const mouthY = height - cmToPx(CM.groundHeight) + Math.min(drillDepth, cmToPx(0.22));
+    for (let i = 0; i < 8; i++) {
+      dirtParticles.push({
+        x: mouthX + rand(-cmToPx(0.05), cmToPx(0.05)),
+        y: mouthY + rand(-cmToPx(0.02), cmToPx(0.02)),
+        vx: rand(-1, 1) * cmToPx(0.5),
+        vy: rand(-1.8, -0.6) * cmToPx(1),
+        life: rand(0.6, 1.2),
+        maxLife: rand(0.6, 1.2),
+        size: rand(cmToPx(0.02), cmToPx(0.055)),
+        color: [COLORS.groundSoil, COLORS.groundShadow, "#E2BD5A"][Math.floor(Math.random() * 3)]
+      });
+    }
+
+    dirtMounds.push({
+      x: mouthX + rand(-cmToPx(0.2), cmToPx(0.2)),
+      width: rand(cmToPx(0.03), cmToPx(0.08)),
+      height: rand(cmToPx(0.01), cmToPx(0.03))
+    });
+
+    if (dirtMounds.length > 220) {
+      dirtMounds.shift();
     }
   }
 
@@ -433,8 +497,8 @@
       const groundTop = height - cmToPx(CM.groundHeight);
       if (p.y >= groundTop - p.size) {
         p.y = groundTop - p.size;
-        p.vx *= 0.76;
-        p.vy *= -0.16;
+        p.vx *= 0.72;
+        p.vy *= -0.12;
       }
     }
   }
@@ -511,6 +575,16 @@
         bird.velocityY = 0;
         birdSettledAfterDeath = true;
       }
+      return;
+    }
+
+    if (state === "drill_end") {
+      drillRotation += dt * 22;
+      drillDepth += cmToPx(0.22) * dt;
+      bird.y += cmToPx(0.12) * dt;
+      spawnDrillDirt();
+      drillReadyToReset = true;
+      return;
     }
   }
 
@@ -528,7 +602,6 @@
         top: 0,
         bottom: pipe.gapTop
       };
-
       const bottomRect = {
         left: screenX,
         right: screenX + pipe.width,
@@ -559,7 +632,7 @@
 
       if (box.bottom >= groundTop) {
         resolveGroundImpact(groundTop);
-        if (birdSettledAfterDeath) return;
+        if (birdSettledAfterDeath || state === "drill_end") return;
       }
 
       let collided = false;
@@ -572,7 +645,6 @@
           top: 0,
           bottom: pipe.gapTop
         };
-
         const bottomRect = {
           left: screenX,
           right: screenX + pipe.width,
@@ -584,7 +656,6 @@
           collided = true;
           break;
         }
-
         if (resolvePipeRectCollision(prevBox, box, bottomRect)) {
           collided = true;
           break;
@@ -595,7 +666,28 @@
     }
   }
 
+  function maybeEnterDrillEaster() {
+    if (!drillTriggeredByNoInput && !anyInputSinceStart && Math.random() < EASTER.drillChance) {
+      state = "drill_end";
+      drillTriggeredByNoInput = true;
+      drillStartTime = performance.now() / 1000;
+      drillDepth = 0;
+      drillRotation = 0;
+      bird.velocityX = 0;
+      bird.velocityY = 0;
+      bird.angle = Math.PI / 2;
+      spawnDirtBurst(bird.x, height - cmToPx(CM.groundHeight), 1.4, true, 1.25);
+      startDrillMusic();
+      return true;
+    }
+    return false;
+  }
+
   function resolveGroundImpact(groundTop) {
+    if (maybeEnterDrillEaster()) {
+      return;
+    }
+
     const speedCm = Math.abs(bird.velocityY) / scale;
     const downwardFacing = bird.angle > 1.02;
     const hardImpact = speedCm > 1.35;
@@ -799,7 +891,7 @@
   function beginEasterEnding() {
     easterEndingReadyToReset = false;
     easterEndingBird = {
-      x: width + cmToPx(0.5),
+      x: width + cmToPx(0.8),
       y: height * 0.18,
       speed: cmToPx(EASTER.endingBirdSpeedCm)
     };
@@ -809,9 +901,15 @@
   function updateEasterEnding(dt) {
     if (state !== "easter_end" || !easterEndingBird) return;
     easterEndingBird.x -= easterEndingBird.speed * dt;
-    if (easterEndingBird.x < -cmToPx(1.4)) {
+    if (easterEndingBird.x < width * EASTER.endingSkipThresholdRatio) {
       easterEndingReadyToReset = true;
     }
+  }
+
+  function updateDrillEnding(dt) {
+    if (state !== "drill_end") return;
+    updateBird(dt);
+    updateParticles(dt);
   }
 
   function checkCollisions() {
@@ -847,7 +945,7 @@
   }
 
   function gameOver() {
-    if (state === "gameover" || state === "easter_end") return;
+    if (state === "gameover" || state === "easter_end" || state === "drill_end") return;
 
     state = "gameover";
     birdSettledAfterDeath = false;
@@ -885,6 +983,11 @@
 
     if (state === "easter_end") {
       updateEasterEnding(dt);
+      return;
+    }
+
+    if (state === "drill_end") {
+      updateDrillEnding(dt);
       return;
     }
 
@@ -961,10 +1064,8 @@
   function drawPipeSegment(x, y, w, h) {
     ctx.fillStyle = COLORS.pipeMain;
     ctx.fillRect(x, y, w, h);
-
     ctx.fillStyle = COLORS.pipeHighlight;
     ctx.fillRect(x + w * 0.08, y, w * 0.18, h);
-
     ctx.fillStyle = COLORS.pipeDark;
     ctx.fillRect(x + w * 0.8, y, w * 0.2, h);
   }
@@ -1001,6 +1102,29 @@
     }
   }
 
+  function drawDrillGroundHole() {
+    if (state !== "drill_end") return;
+
+    const groundTop = height - cmToPx(CM.groundHeight);
+    const holeW = bird.size * 0.95;
+    const holeDepth = Math.min(drillDepth, cmToPx(0.95));
+
+    ctx.fillStyle = "rgba(0,0,0,0.22)";
+    ctx.beginPath();
+    ctx.ellipse(bird.x, groundTop + cmToPx(0.03), holeW * 0.55, holeW * 0.15, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#7b5d0f";
+    ctx.fillRect(bird.x - holeW * 0.45, groundTop + cmToPx(0.02), holeW * 0.9, holeDepth);
+
+    for (const mound of dirtMounds) {
+      ctx.fillStyle = COLORS.groundSoil;
+      ctx.beginPath();
+      ctx.ellipse(mound.x, groundTop - mound.height * 0.18, mound.width, mound.height, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
   function drawBirdSprite(x, y, size, angle, mirrored, withFace = true) {
     const beakLength = size * 0.5;
     const beakWidth = size * 0.125;
@@ -1010,11 +1134,7 @@
 
     ctx.save();
     ctx.translate(x, y);
-
-    if (mirrored) {
-      ctx.scale(-1, 1);
-    }
-
+    if (mirrored) ctx.scale(-1, 1);
     ctx.rotate(angle);
 
     ctx.fillStyle = COLORS.birdShadow;
@@ -1056,7 +1176,44 @@
     ctx.restore();
   }
 
+  function drawDrillBird() {
+    const size = bird.size;
+    drawBirdSprite(bird.x, bird.y, size, Math.PI / 2, false, true);
+
+    const drillRadius = size * 0.5;
+    const drillHeight = size * 0.78;
+
+    ctx.save();
+    ctx.translate(bird.x, bird.y + size * 0.5);
+    ctx.rotate(drillRotation);
+
+    ctx.fillStyle = "#D8D8D8";
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(-drillRadius * 0.5, drillHeight);
+    ctx.lineTo(drillRadius * 0.5, drillHeight);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = "#8A8A8A";
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 4; i++) {
+      const yy = (drillHeight / 4) * i;
+      ctx.beginPath();
+      ctx.moveTo(-drillRadius * 0.35, yy + 2);
+      ctx.lineTo(drillRadius * 0.25, yy + drillHeight / 5);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
   function drawBird() {
+    if (state === "drill_end") {
+      drawDrillBird();
+      return;
+    }
+    if (state === "easter_end") return;
     drawBirdSprite(bird.x, bird.y, bird.size, bird.angle, reverseMode && state === "playing", true);
   }
 
@@ -1071,7 +1228,7 @@
   }
 
   function drawScore() {
-    if (state === "easter_end") return;
+    if (state === "easter_end" || state === "drill_end") return;
 
     const fontSize = Math.max(26, Math.floor(height * 0.05));
     ctx.textAlign = "center";
@@ -1143,10 +1300,11 @@
     }
   }
 
-  function drawWhiteClothFlag(x, y, scaleSize) {
-    const poleLen = scaleSize * 0.8;
-    const clothW = scaleSize * 0.95;
-    const clothH = scaleSize * 0.55;
+  function drawWhiteClothFlagBehindBird(x, y, scaleSize) {
+    const ropeLen = scaleSize * 0.75;
+    const clothW = scaleSize * 1.35;
+    const clothH = scaleSize * 0.78;
+    const wave = Math.sin(performance.now() * 0.008) * clothH * 0.08;
 
     ctx.save();
     ctx.translate(x, y);
@@ -1155,52 +1313,53 @@
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(0, 0);
-    ctx.lineTo(-poleLen, -scaleSize * 0.05);
+    ctx.lineTo(-ropeLen, 0);
     ctx.stroke();
 
     ctx.fillStyle = "#FFFFFF";
     ctx.beginPath();
-    ctx.moveTo(-poleLen, -clothH * 0.45);
+    ctx.moveTo(-ropeLen, -clothH * 0.5);
     ctx.bezierCurveTo(
-      -poleLen - clothW * 0.3, -clothH * 0.7,
-      -poleLen - clothW * 0.7, -clothH * 0.15,
-      -poleLen - clothW, -clothH * 0.35
+      -ropeLen - clothW * 0.28, -clothH * 0.72 + wave,
+      -ropeLen - clothW * 0.68, -clothH * 0.08,
+      -ropeLen - clothW, -clothH * 0.30 + wave
     );
     ctx.bezierCurveTo(
-      -poleLen - clothW * 0.75, 0,
-      -poleLen - clothW * 0.95, clothH * 0.4,
-      -poleLen - clothW, clothH * 0.25
+      -ropeLen - clothW * 0.76, 0,
+      -ropeLen - clothW * 0.96, clothH * 0.46,
+      -ropeLen - clothW, clothH * 0.20
     );
     ctx.bezierCurveTo(
-      -poleLen - clothW * 0.62, clothH * 0.62,
-      -poleLen - clothW * 0.22, clothH * 0.28,
-      -poleLen, clothH * 0.42
+      -ropeLen - clothW * 0.68, clothH * 0.62,
+      -ropeLen - clothW * 0.24, clothH * 0.18,
+      -ropeLen, clothH * 0.48
     );
     ctx.closePath();
     ctx.fill();
 
-    ctx.strokeStyle = "rgba(0,0,0,0.18)";
+    ctx.strokeStyle = "rgba(0,0,0,0.16)";
     ctx.lineWidth = 1.2;
     ctx.stroke();
 
     ctx.fillStyle = "#444";
-    ctx.font = `bold ${Math.max(12, Math.floor(scaleSize * 0.16))}px Arial`;
+    ctx.font = `bold ${Math.max(12, Math.floor(scaleSize * 0.17))}px Arial`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText("你認真？", -poleLen - clothW * 0.52, 0);
+    ctx.fillText("你認真？", -ropeLen - clothW * 0.52, clothH * 0.03);
 
     ctx.restore();
   }
 
   function drawEasterEnding() {
     if (!easterEndingBird) return;
+    const size = Math.max(34, cmToPx(0.24));
 
-    drawBirdSprite(easterEndingBird.x, easterEndingBird.y, Math.max(34, cmToPx(0.24)), 0.02, true, false);
-    drawWhiteClothFlag(
-      easterEndingBird.x - Math.max(34, cmToPx(0.24)) * 0.52,
+    drawWhiteClothFlagBehindBird(
+      easterEndingBird.x - size * 0.5,
       easterEndingBird.y,
-      Math.max(34, cmToPx(0.24))
+      size
     );
+    drawBirdSprite(easterEndingBird.x, easterEndingBird.y, size, 0.02, true, true);
 
     if (easterEndingReadyToReset) {
       ctx.font = `bold ${Math.max(18, Math.floor(height * 0.03))}px Arial`;
@@ -1210,6 +1369,28 @@
       ctx.fillText("點擊畫面重新開始", width / 2 + 2, height * 0.32 + 2);
       ctx.fillStyle = COLORS.text;
       ctx.fillText("點擊畫面重新開始", width / 2, height * 0.32);
+    }
+  }
+
+  function drawDrillEnding() {
+    const elapsed = performance.now() / 1000 - drillStartTime;
+    if (elapsed >= EASTER.drillLockSeconds) {
+      ctx.font = `bold ${Math.max(18, Math.floor(height * 0.03))}px Arial`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      ctx.fillStyle = COLORS.textShadow;
+      ctx.fillText("點擊畫面重新開始", width / 2 + 2, height * 0.18 + 2);
+      ctx.fillStyle = COLORS.text;
+      ctx.fillText("點擊畫面重新開始", width / 2, height * 0.18);
+    } else {
+      const remain = Math.ceil(EASTER.drillLockSeconds - elapsed);
+      ctx.font = `bold ${Math.max(18, Math.floor(height * 0.03))}px Arial`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      ctx.fillStyle = COLORS.textShadow;
+      ctx.fillText(`請先看牠挖 ${remain}`, width / 2 + 2, height * 0.18 + 2);
+      ctx.fillStyle = COLORS.text;
+      ctx.fillText(`請先看牠挖 ${remain}`, width / 2, height * 0.18);
     }
   }
 
@@ -1253,8 +1434,8 @@
           ? `分數 ${score} / 最高分 ${highScore}　・　點擊或空白鍵重開`
           : `分數 ${score} / 最高分 ${highScore}`
       );
-    } else if (state === "easter_end") {
-      drawEasterEnding();
+    } else if (state === "drill_end") {
+      drawDrillEnding();
     }
   }
 
@@ -1263,16 +1444,14 @@
     drawClouds();
     drawPipes();
     drawGround();
+    drawDrillGroundHole();
 
-    if (state !== "easter_end") {
+    if (state === "easter_end") {
+      drawEasterEnding();
+    } else {
       drawBird();
       drawParticles();
       drawScore();
-    } else {
-      drawEasterEnding();
-    }
-
-    if (state !== "easter_end") {
       drawHUDOverlays();
     }
 
@@ -1417,7 +1596,7 @@
       audioContext.resume();
     }
 
-    if (!bgmStarted && !easterBgmActive) {
+    if (!bgmStarted && !easterBgmActive && !drillBgmActive) {
       startBackgroundMusic();
       bgmStarted = true;
     }
@@ -1432,13 +1611,14 @@
     masterGain.gain.setValueAtTime(soundEnabled ? 0.18 : 0.0001, now);
   }
 
-  function stopEasterEndingMusic() {
+  function stopSpecialMusic() {
     if (musicSchedulerLookAhead) {
       clearInterval(musicSchedulerLookAhead);
       musicSchedulerLookAhead = null;
     }
 
     easterBgmActive = false;
+    drillBgmActive = false;
 
     easterBgmNodes.forEach((node) => {
       try {
@@ -1450,8 +1630,7 @@
 
   function startEasterEndingMusic() {
     if (!audioContext) return;
-
-    stopEasterEndingMusic();
+    stopSpecialMusic();
     easterBgmActive = true;
 
     let phraseStart = audioContext.currentTime + 0.05;
@@ -1465,6 +1644,52 @@
     }, 1600);
   }
 
+  function startDrillMusic() {
+    if (!audioContext) return;
+    stopSpecialMusic();
+    drillBgmActive = true;
+
+    musicSchedulerLookAhead = setInterval(() => {
+      if (!audioContext || !drillBgmActive) return;
+      playDrillHum(audioContext.currentTime);
+    }, 160);
+
+    playDrillHum(audioContext.currentTime);
+  }
+
+  function playDrillHum(start) {
+    if (!audioContext || !masterGain || !soundEnabled) return;
+
+    const oscA = audioContext.createOscillator();
+    const oscB = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+    const filter = audioContext.createBiquadFilter();
+
+    oscA.type = "sawtooth";
+    oscB.type = "triangle";
+    oscA.frequency.setValueAtTime(110 + Math.sin(start * 15) * 12, start);
+    oscB.frequency.setValueAtTime(220 + Math.cos(start * 13) * 18, start);
+
+    filter.type = "lowpass";
+    filter.frequency.setValueAtTime(950, start);
+
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.linearRampToValueAtTime(0.028, start + 0.01);
+    gain.gain.linearRampToValueAtTime(0.0001, start + 0.14);
+
+    oscA.connect(filter);
+    oscB.connect(filter);
+    filter.connect(gain);
+    gain.connect(masterGain);
+
+    oscA.start(start);
+    oscB.start(start);
+    oscA.stop(start + 0.15);
+    oscB.stop(start + 0.15);
+
+    easterBgmNodes.push(oscA, oscB);
+  }
+
   function scheduleAwkwardLoop(start) {
     if (!audioContext || !masterGain) return;
 
@@ -1472,11 +1697,11 @@
       { f: 261.63, d: 0.22 },
       { f: 277.18, d: 0.18 },
       { f: 261.63, d: 0.16 },
-      { f: 220.00, d: 0.42 },
+      { f: 220.0, d: 0.42 },
       { f: 0, d: 0.08 },
-      { f: 220.00, d: 0.16 },
+      { f: 220.0, d: 0.16 },
       { f: 233.08, d: 0.16 },
-      { f: 220.00, d: 0.50 }
+      { f: 220.0, d: 0.50 }
     ];
 
     let t = start;
@@ -1804,14 +2029,14 @@
 
   function startBackgroundMusic() {
     if (!audioContext) return;
-    if (easterBgmActive) return;
+    if (easterBgmActive || drillBgmActive) return;
 
     nextMusicTime = audioContext.currentTime + 0.08;
     scheduleMusicChunk();
     scheduleMusicChunk();
 
     musicSchedulerLookAhead = setInterval(() => {
-      if (!audioContext || easterBgmActive) return;
+      if (!audioContext || easterBgmActive || drillBgmActive) return;
       while (nextMusicTime < audioContext.currentTime + 1.2) {
         scheduleMusicChunk();
       }
