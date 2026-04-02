@@ -84,7 +84,8 @@
     endingSkipThresholdRatio: 0.55,
 
     drillChance: 0.1,
-    drillLockSeconds: 3
+    drillLockSeconds: 3,
+    drillDigSpeedCm: 0.23
   };
 
   let width = 0;
@@ -111,28 +112,28 @@
 
   let audioContext = null;
   let masterGain = null;
-  let bgmStarted = false;
-  let nextMusicTime = 0;
-  let musicSchedulerLookAhead = null;
+  let bgmTimer = null;
+  let specialAudioNodes = [];
 
-  let easterBgmActive = false;
-  let easterBgmNodes = [];
-  let easterEndingReadyToReset = false;
   let easterEndingBird = null;
+  let easterEndingReadyToReset = false;
 
-  let drillBgmActive = false;
   let drillStartTime = 0;
   let drillReadyToReset = false;
   let drillDepth = 0;
   let drillRotation = 0;
-  let drillTriggeredByNoInput = false;
-  let anyInputSinceStart = false;
+
+  let cameraShakeTime = 0;
+  let cameraShakeStrength = 0;
 
   let worldOffsetPx = 0;
   let reverseMode = false;
   let worldFrozenForExit = false;
   let leftSwipeTimes = [];
   let pointerTracking = null;
+
+  let hasActuallyStarted = false;
+  let anyInputAfterStart = false;
 
   function cmToPx(cm) {
     return cm * scale;
@@ -193,9 +194,6 @@
     birdSettledAfterDeath = false;
     deathPose = "none";
 
-    highScore = previousHighScore;
-    state = "ready";
-
     easterEndingBird = null;
     easterEndingReadyToReset = false;
 
@@ -203,10 +201,17 @@
     drillReadyToReset = false;
     drillDepth = 0;
     drillRotation = 0;
-    drillTriggeredByNoInput = false;
-    anyInputSinceStart = false;
 
-    stopSpecialMusic();
+    cameraShakeTime = 0;
+    cameraShakeStrength = 0;
+
+    hasActuallyStarted = false;
+    anyInputAfterStart = false;
+
+    highScore = previousHighScore;
+    state = "ready";
+
+    stopAllAudioLoops();
     createInitialPipes();
   }
 
@@ -250,25 +255,6 @@
     ensurePipesFilled();
   }
 
-  function getPipeSpacingCm(currentScore) {
-    if (currentScore <= 20) {
-      const t = smoothstep01(currentScore / 20);
-      return lerp(CM.minPipeSpacing, CM.midPipeSpacing, t);
-    }
-    if (currentScore <= 30) {
-      const t = smoothstep01((currentScore - 20) / 10);
-      return lerp(CM.midPipeSpacing, CM.maxPipeSpacing, t);
-    }
-    const extra = 1 - Math.exp(-(currentScore - 30) / 25);
-    return lerp(CM.maxPipeSpacing, CM.maxPipeSpacing + 0.45, extra);
-  }
-
-  function getSceneSpeedCmPerSec(timeSec, currentScore) {
-    const byTime = CM.initialSceneSpeed + CM.accelerationPerSecond * timeSec;
-    const byScoreBonus = Math.min(currentScore * 0.008, 0.25);
-    return clamp(byTime + byScoreBonus, CM.initialSceneSpeed, CM.maxSceneSpeed);
-  }
-
   function createPipe(worldX) {
     const gapHeight = cmToPx(CM.pipeGapHeight);
     const pipeWidth = cmToPx(CM.pipeWidth);
@@ -287,9 +273,16 @@
     };
   }
 
+  function getPipeSpacingCmByTime(timeSec) {
+    const startSpacing = 3.0;
+    const endSpacing = 0.95;
+    const t = smoothstep01(timeSec / 50);
+    return lerp(startSpacing, endSpacing, t);
+  }
+
   function ensurePipesFilled() {
     const pipeWidthPx = cmToPx(CM.pipeWidth);
-    const spacingPx = cmToPx(getPipeSpacingCm(score));
+    const spacingPx = cmToPx(getPipeSpacingCmByTime(elapsedGameTime));
     const minRightWorldX = worldOffsetPx + width + spacingPx + pipeWidthPx;
 
     if (pipes.length === 0) {
@@ -303,21 +296,14 @@
     }
   }
 
+  function getSceneSpeedCmPerSec(timeSec, currentScore) {
+    const byTime = CM.initialSceneSpeed + CM.accelerationPerSecond * timeSec;
+    const byScoreBonus = Math.min(currentScore * 0.008, 0.25);
+    return clamp(byTime + byScoreBonus, CM.initialSceneSpeed, CM.maxSceneSpeed);
+  }
+
   function getPipeScreenX(pipe) {
     return pipe.worldX - worldOffsetPx;
-  }
-
-  function startPlayingIfNeeded() {
-    if (state === "ready") {
-      state = "playing";
-      flapBird();
-    }
-  }
-
-  function flapBird() {
-    if (state === "gameover" || state === "easter_end" || state === "drill_end") return;
-    bird.velocityY = cmToPx(CM.jumpImpulse);
-    playFlapSound();
   }
 
   function getSoundButtonRect() {
@@ -336,9 +322,37 @@
   }
 
   function markUserInput() {
-    if (state === "playing") {
-      anyInputSinceStart = true;
+    if (state === "playing" && hasActuallyStarted) {
+      anyInputAfterStart = true;
     }
+  }
+
+  function ensureAudio() {
+    if (!audioContext) {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      audioContext = new AudioCtx();
+      masterGain = audioContext.createGain();
+      masterGain.gain.value = soundEnabled ? 0.18 : 0.0001;
+      masterGain.connect(audioContext.destination);
+    }
+
+    if (audioContext.state === "suspended") {
+      audioContext.resume();
+    }
+
+    if (!bgmTimer && state !== "easter_end" && state !== "drill_end") {
+      startBackgroundMusicLoop();
+    }
+
+    updateMasterGain();
+  }
+
+  function updateMasterGain() {
+    if (!masterGain || !audioContext) return;
+    const now = audioContext.currentTime;
+    masterGain.gain.cancelScheduledValues(now);
+    masterGain.gain.setValueAtTime(soundEnabled ? 0.18 : 0.0001, now);
   }
 
   function toggleSound() {
@@ -347,11 +361,25 @@
     updateMasterGain();
   }
 
+  function startPlayingIfNeeded() {
+    if (state === "ready") {
+      state = "playing";
+      hasActuallyStarted = true;
+      anyInputAfterStart = false;
+      flapBird();
+    }
+  }
+
+  function flapBird() {
+    if (state === "gameover" || state === "easter_end" || state === "drill_end") return;
+    bird.velocityY = cmToPx(CM.jumpImpulse);
+    playFlapSound();
+  }
+
   function triggerAction() {
     ensureAudio();
 
     if (state === "ready") {
-      markUserInput();
       startPlayingIfNeeded();
       return;
     }
@@ -382,20 +410,8 @@
     }
   }
 
-  function enterReverseMode() {
-    if (state !== "playing" || reverseMode) return;
-    reverseMode = true;
-  }
-
-  function exitReverseMode() {
-    if (state !== "playing" || !reverseMode) return;
-    reverseMode = false;
-    worldFrozenForExit = false;
-  }
-
   function registerSwipe(dx, dy) {
     if (state !== "playing") return;
-
     if (Math.abs(dy) > EASTER.swipeMaxOffAxis) return;
     if (Math.abs(dx) < EASTER.swipeMinDistance) return;
 
@@ -407,14 +423,15 @@
       leftSwipeTimes = leftSwipeTimes.filter((t) => now - t <= EASTER.swipeWindowMs);
       leftSwipeTimes.push(now);
       if (leftSwipeTimes.length >= 3) {
-        enterReverseMode();
+        reverseMode = true;
         leftSwipeTimes = [];
       }
     } else if (dx > 0) {
       markUserInput();
       leftSwipeTimes = [];
       if (reverseMode) {
-        exitReverseMode();
+        reverseMode = false;
+        worldFrozenForExit = false;
       }
     }
   }
@@ -429,9 +446,47 @@
     };
   }
 
+  function isBirdRestingOnSurface() {
+    const box = getBirdBoxAt(bird.x, bird.y);
+    const groundTop = height - cmToPx(CM.groundHeight);
+    if (Math.abs(box.bottom - groundTop) < 1.5) return true;
+
+    for (const pipe of pipes) {
+      const screenX = getPipeScreenX(pipe);
+
+      const topRect = {
+        left: screenX,
+        right: screenX + pipe.width,
+        top: 0,
+        bottom: pipe.gapTop
+      };
+
+      const bottomRect = {
+        left: screenX,
+        right: screenX + pipe.width,
+        top: pipe.gapTop + pipe.gapHeight,
+        bottom: groundTop
+      };
+
+      if (
+        box.right > topRect.left &&
+        box.left < topRect.right &&
+        Math.abs(box.top - topRect.bottom) < 1.5
+      ) return true;
+
+      if (
+        box.right > bottomRect.left &&
+        box.left < bottomRect.right &&
+        Math.abs(box.bottom - bottomRect.top) < 1.5
+      ) return true;
+    }
+
+    return false;
+  }
+
   function spawnDirtBurst(x, y, strength, embed = false, upwardBias = 1) {
     const count = embed ? 42 : 30;
-    const baseSpeed = embed ? 1.95 : 1.30;
+    const baseSpeed = embed ? 1.95 : 1.3;
 
     for (let i = 0; i < count; i++) {
       const angle = rand(-Math.PI * 0.98, -Math.PI * 0.02);
@@ -456,7 +511,9 @@
 
   function spawnDrillDirt() {
     const mouthX = bird.x;
-    const mouthY = height - cmToPx(CM.groundHeight) + Math.min(drillDepth, cmToPx(0.22));
+    const groundTop = height - cmToPx(CM.groundHeight);
+    const mouthY = groundTop + Math.min(drillDepth, cmToPx(0.22));
+
     for (let i = 0; i < 8; i++) {
       dirtParticles.push({
         x: mouthX + rand(-cmToPx(0.05), cmToPx(0.05)),
@@ -470,13 +527,15 @@
       });
     }
 
+    const moundSpread = Math.min(drillDepth * 0.7, cmToPx(0.55));
     dirtMounds.push({
-      x: mouthX + rand(-cmToPx(0.2), cmToPx(0.2)),
+      side: Math.random() < 0.5 ? -1 : 1,
+      offset: rand(cmToPx(0.05), moundSpread + cmToPx(0.08)),
       width: rand(cmToPx(0.03), cmToPx(0.08)),
-      height: rand(cmToPx(0.01), cmToPx(0.03))
+      height: rand(cmToPx(0.01), cmToPx(0.03)) + Math.min(drillDepth * 0.05, cmToPx(0.035))
     });
 
-    if (dirtMounds.length > 220) {
+    if (dirtMounds.length > 260) {
       dirtMounds.shift();
     }
   }
@@ -503,6 +562,28 @@
     }
   }
 
+  function maybeTriggerDrillEaster() {
+    if (anyInputAfterStart) return false;
+    if (Math.random() >= EASTER.drillChance) return false;
+
+    state = "drill_end";
+    drillStartTime = performance.now() / 1000;
+    drillReadyToReset = false;
+    drillDepth = 0;
+    drillRotation = 0;
+
+    bird.velocityX = 0;
+    bird.velocityY = 0;
+    bird.angle = Math.PI / 2;
+
+    spawnDirtBurst(bird.x, height - cmToPx(CM.groundHeight), 1.4, true, 1.25);
+    cameraShakeTime = 0.28;
+    cameraShakeStrength = cmToPx(0.015);
+
+    startDrillMusic();
+    return true;
+  }
+
   function updateBird(dt) {
     const groundTop = height - cmToPx(CM.groundHeight);
     const gravityPx = cmToPx(CM.gravity);
@@ -527,11 +608,7 @@
       bird.y += bird.velocityY * dt;
 
       const t = clamp(bird.velocityY / maxFallSpeedPx, -1, 1);
-      if (reverseMode) {
-        bird.angle = lerp(0.6, -1.2, (t + 1) / 2);
-      } else {
-        bird.angle = lerp(-0.6, 1.2, (t + 1) / 2);
-      }
+      bird.angle = reverseMode ? lerp(0.6, -1.2, (t + 1) / 2) : lerp(-0.6, 1.2, (t + 1) / 2);
       return;
     }
 
@@ -541,13 +618,9 @@
       if (birdSettledAfterDeath) {
         bird.velocityX = 0;
         bird.velocityY = 0;
-        if (deathPose === "embed") {
-          bird.angle = lerp(bird.angle, 1.35, 0.18);
-        } else if (deathPose === "pipe") {
-          bird.angle = lerp(bird.angle, 1.18, 0.18);
-        } else {
-          bird.angle = lerp(bird.angle, 1.0, 0.18);
-        }
+        if (deathPose === "embed") bird.angle = lerp(bird.angle, 1.35, 0.18);
+        else if (deathPose === "pipe") bird.angle = lerp(bird.angle, 1.18, 0.18);
+        else bird.angle = lerp(bird.angle, 1.0, 0.18);
         return;
       }
 
@@ -580,49 +653,14 @@
 
     if (state === "drill_end") {
       drillRotation += dt * 22;
-      drillDepth += cmToPx(0.22) * dt;
+      drillDepth += cmToPx(EASTER.drillDigSpeedCm) * dt;
       bird.y += cmToPx(0.12) * dt;
       spawnDrillDirt();
+      cameraShakeTime = Math.max(cameraShakeTime, 0.08);
+      cameraShakeStrength = cmToPx(0.01 + Math.min(drillDepth / cmToPx(1.2), 1) * 0.012);
       drillReadyToReset = true;
       return;
     }
-  }
-
-  function isBirdRestingOnSurface() {
-    const box = getBirdBoxAt(bird.x, bird.y);
-    const groundTop = height - cmToPx(CM.groundHeight);
-
-    if (Math.abs(box.bottom - groundTop) < 1.5) return true;
-
-    for (const pipe of pipes) {
-      const screenX = getPipeScreenX(pipe);
-      const topRect = {
-        left: screenX,
-        right: screenX + pipe.width,
-        top: 0,
-        bottom: pipe.gapTop
-      };
-      const bottomRect = {
-        left: screenX,
-        right: screenX + pipe.width,
-        top: pipe.gapTop + pipe.gapHeight,
-        bottom: groundTop
-      };
-
-      if (
-        box.right > topRect.left &&
-        box.left < topRect.right &&
-        Math.abs(box.top - topRect.bottom) < 1.5
-      ) return true;
-
-      if (
-        box.right > bottomRect.left &&
-        box.left < bottomRect.right &&
-        Math.abs(box.bottom - bottomRect.top) < 1.5
-      ) return true;
-    }
-
-    return false;
   }
 
   function resolveDeathCollision(prevX, prevY, groundTop) {
@@ -639,12 +677,7 @@
 
       for (const pipe of pipes) {
         const screenX = getPipeScreenX(pipe);
-        const topRect = {
-          left: screenX,
-          right: screenX + pipe.width,
-          top: 0,
-          bottom: pipe.gapTop
-        };
+        const topRect = { left: screenX, right: screenX + pipe.width, top: 0, bottom: pipe.gapTop };
         const bottomRect = {
           left: screenX,
           right: screenX + pipe.width,
@@ -666,27 +699,8 @@
     }
   }
 
-  function maybeEnterDrillEaster() {
-    if (!drillTriggeredByNoInput && !anyInputSinceStart && Math.random() < EASTER.drillChance) {
-      state = "drill_end";
-      drillTriggeredByNoInput = true;
-      drillStartTime = performance.now() / 1000;
-      drillDepth = 0;
-      drillRotation = 0;
-      bird.velocityX = 0;
-      bird.velocityY = 0;
-      bird.angle = Math.PI / 2;
-      spawnDirtBurst(bird.x, height - cmToPx(CM.groundHeight), 1.4, true, 1.25);
-      startDrillMusic();
-      return true;
-    }
-    return false;
-  }
-
   function resolveGroundImpact(groundTop) {
-    if (maybeEnterDrillEaster()) {
-      return;
-    }
+    if (maybeTriggerDrillEaster()) return;
 
     const speedCm = Math.abs(bird.velocityY) / scale;
     const downwardFacing = bird.angle > 1.02;
@@ -747,15 +761,11 @@
     const cameFromLeft = prevBox.right <= rect.left;
     const cameFromRight = prevBox.left >= rect.right;
 
-    if (cameFromTop) {
-      normalY = -1;
-    } else if (cameFromBottom) {
-      normalY = 1;
-    } else if (cameFromLeft) {
-      normalX = -1;
-    } else if (cameFromRight) {
-      normalX = 1;
-    } else {
+    if (cameFromTop) normalY = -1;
+    else if (cameFromBottom) normalY = 1;
+    else if (cameFromLeft) normalX = -1;
+    else if (cameFromRight) normalX = 1;
+    else {
       const minOverlap = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
       if (minOverlap === overlapLeft) normalX = -1;
       else if (minOverlap === overlapRight) normalX = 1;
@@ -804,6 +814,24 @@
     }
 
     return false;
+  }
+
+  function beginEasterEnding() {
+    easterEndingReadyToReset = false;
+    easterEndingBird = {
+      x: width + cmToPx(0.8),
+      y: height * 0.18,
+      speed: cmToPx(EASTER.endingBirdSpeedCm)
+    };
+    startEasterEndingMusic();
+  }
+
+  function updateEasterEnding(dt) {
+    if (state !== "easter_end" || !easterEndingBird) return;
+    easterEndingBird.x -= easterEndingBird.speed * dt;
+    if (easterEndingBird.x < width * EASTER.endingSkipThresholdRatio) {
+      easterEndingReadyToReset = true;
+    }
   }
 
   function updateClouds(dt, sceneSpeedPxPerSec) {
@@ -883,33 +911,19 @@
       pipes.shift();
     }
 
-    if (!reverseMode) {
-      ensurePipesFilled();
-    }
+    if (!reverseMode) ensurePipesFilled();
   }
 
-  function beginEasterEnding() {
-    easterEndingReadyToReset = false;
-    easterEndingBird = {
-      x: width + cmToPx(0.8),
-      y: height * 0.18,
-      speed: cmToPx(EASTER.endingBirdSpeedCm)
-    };
-    startEasterEndingMusic();
-  }
+  function updateGround(dt, sceneSpeedPxPerSec) {
+    if (state !== "playing") return;
+    if (worldFrozenForExit) return;
 
-  function updateEasterEnding(dt) {
-    if (state !== "easter_end" || !easterEndingBird) return;
-    easterEndingBird.x -= easterEndingBird.speed * dt;
-    if (easterEndingBird.x < width * EASTER.endingSkipThresholdRatio) {
-      easterEndingReadyToReset = true;
-    }
-  }
+    if (!reverseMode) groundOffsetPx -= sceneSpeedPxPerSec * dt;
+    else groundOffsetPx += cmToPx(EASTER.reverseFlightSpeedCm) * dt;
 
-  function updateDrillEnding(dt) {
-    if (state !== "drill_end") return;
-    updateBird(dt);
-    updateParticles(dt);
+    const grassStripe = cmToPx(0.18);
+    while (groundOffsetPx <= -grassStripe) groundOffsetPx += grassStripe;
+    while (groundOffsetPx >= grassStripe) groundOffsetPx -= grassStripe;
   }
 
   function checkCollisions() {
@@ -958,24 +972,20 @@
     playGameOverSound();
   }
 
-  function updateGround(dt, sceneSpeedPxPerSec) {
-    if (state !== "playing") return;
-    if (worldFrozenForExit) return;
-
-    if (!reverseMode) {
-      groundOffsetPx -= sceneSpeedPxPerSec * dt;
-    } else {
-      groundOffsetPx += cmToPx(EASTER.reverseFlightSpeedCm) * dt;
+  function updateCamera(dt) {
+    if (cameraShakeTime > 0) {
+      cameraShakeTime = Math.max(0, cameraShakeTime - dt);
+      if (cameraShakeTime === 0) {
+        cameraShakeStrength = 0;
+      }
     }
-
-    const grassStripe = cmToPx(0.18);
-    while (groundOffsetPx <= -grassStripe) groundOffsetPx += grassStripe;
-    while (groundOffsetPx >= grassStripe) groundOffsetPx -= grassStripe;
   }
 
   function update(dt) {
     const sceneSpeedCmPerSec = getSceneSpeedCmPerSec(elapsedGameTime, score);
     const sceneSpeedPxPerSec = cmToPx(sceneSpeedCmPerSec);
+
+    updateCamera(dt);
 
     if (state === "playing" && !reverseMode) {
       elapsedGameTime += dt;
@@ -986,13 +996,12 @@
       return;
     }
 
-    if (state === "drill_end") {
-      updateDrillEnding(dt);
-      return;
-    }
-
     updateBird(dt);
     updateParticles(dt);
+
+    if (state === "drill_end") {
+      return;
+    }
 
     if (state === "playing") {
       updateClouds(dt, sceneSpeedPxPerSec);
@@ -1033,9 +1042,7 @@
   }
 
   function drawClouds() {
-    for (const cloud of clouds) {
-      drawCloud(cloud);
-    }
+    for (const cloud of clouds) drawCloud(cloud);
   }
 
   function drawPipe(pipe) {
@@ -1091,7 +1098,12 @@
     ctx.fillRect(0, groundTop + grassHeight, width, groundHeight - grassHeight);
 
     ctx.fillStyle = COLORS.groundShadow;
-    ctx.fillRect(0, groundTop + grassHeight + (groundHeight - grassHeight) * 0.58, width, (groundHeight - grassHeight) * 0.42);
+    ctx.fillRect(
+      0,
+      groundTop + grassHeight + (groundHeight - grassHeight) * 0.58,
+      width,
+      (groundHeight - grassHeight) * 0.42
+    );
 
     for (let x = groundOffsetPx - stripeWidth; x < width + stripeWidth; x += stripeWidth) {
       ctx.fillStyle = "rgba(255,255,255,0.12)";
@@ -1106,21 +1118,22 @@
     if (state !== "drill_end") return;
 
     const groundTop = height - cmToPx(CM.groundHeight);
-    const holeW = bird.size * 0.95;
-    const holeDepth = Math.min(drillDepth, cmToPx(0.95));
+    const holeW = bird.size * 1.05;
+    const holeDepth = Math.min(drillDepth, cmToPx(1.2));
 
     ctx.fillStyle = "rgba(0,0,0,0.22)";
     ctx.beginPath();
-    ctx.ellipse(bird.x, groundTop + cmToPx(0.03), holeW * 0.55, holeW * 0.15, 0, 0, Math.PI * 2);
+    ctx.ellipse(bird.x, groundTop + cmToPx(0.03), holeW * 0.58, holeW * 0.16, 0, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.fillStyle = "#7b5d0f";
-    ctx.fillRect(bird.x - holeW * 0.45, groundTop + cmToPx(0.02), holeW * 0.9, holeDepth);
+    ctx.fillRect(bird.x - holeW * 0.46, groundTop + cmToPx(0.02), holeW * 0.92, holeDepth);
 
     for (const mound of dirtMounds) {
+      const moundX = bird.x + mound.side * mound.offset;
       ctx.fillStyle = COLORS.groundSoil;
       ctx.beginPath();
-      ctx.ellipse(mound.x, groundTop - mound.height * 0.18, mound.width, mound.height, 0, 0, Math.PI * 2);
+      ctx.ellipse(moundX, groundTop - mound.height * 0.18, mound.width, mound.height, 0, 0, Math.PI * 2);
       ctx.fill();
     }
   }
@@ -1304,7 +1317,10 @@
     const ropeLen = scaleSize * 0.75;
     const clothW = scaleSize * 1.35;
     const clothH = scaleSize * 0.78;
-    const wave = Math.sin(performance.now() * 0.008) * clothH * 0.08;
+
+    const t = performance.now() * 0.006;
+    const wave1 = Math.sin(t) * clothH * 0.10;
+    const wave2 = Math.cos(t * 1.3) * clothH * 0.07;
 
     ctx.save();
     ctx.translate(x, y);
@@ -1320,19 +1336,24 @@
     ctx.beginPath();
     ctx.moveTo(-ropeLen, -clothH * 0.5);
     ctx.bezierCurveTo(
-      -ropeLen - clothW * 0.28, -clothH * 0.72 + wave,
-      -ropeLen - clothW * 0.68, -clothH * 0.08,
-      -ropeLen - clothW, -clothH * 0.30 + wave
+      -ropeLen - clothW * 0.18, -clothH * 0.75 + wave1,
+      -ropeLen - clothW * 0.46, -clothH * 0.12 + wave2,
+      -ropeLen - clothW * 0.72, -clothH * 0.36 + wave1
     );
     ctx.bezierCurveTo(
-      -ropeLen - clothW * 0.76, 0,
-      -ropeLen - clothW * 0.96, clothH * 0.46,
-      -ropeLen - clothW, clothH * 0.20
+      -ropeLen - clothW * 0.90, -clothH * 0.18 + wave2,
+      -ropeLen - clothW * 1.02, clothH * 0.12 + wave1,
+      -ropeLen - clothW, clothH * 0.18
     );
     ctx.bezierCurveTo(
-      -ropeLen - clothW * 0.68, clothH * 0.62,
-      -ropeLen - clothW * 0.24, clothH * 0.18,
-      -ropeLen, clothH * 0.48
+      -ropeLen - clothW * 0.82, clothH * 0.42 + wave2,
+      -ropeLen - clothW * 0.56, clothH * 0.58 + wave1,
+      -ropeLen - clothW * 0.34, clothH * 0.32
+    );
+    ctx.bezierCurveTo(
+      -ropeLen - clothW * 0.18, clothH * 0.12,
+      -ropeLen - clothW * 0.08, clothH * 0.58 + wave2,
+      -ropeLen, clothH * 0.46
     );
     ctx.closePath();
     ctx.fill();
@@ -1374,19 +1395,17 @@
 
   function drawDrillEnding() {
     const elapsed = performance.now() / 1000 - drillStartTime;
+    ctx.font = `bold ${Math.max(18, Math.floor(height * 0.03))}px Arial`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+
     if (elapsed >= EASTER.drillLockSeconds) {
-      ctx.font = `bold ${Math.max(18, Math.floor(height * 0.03))}px Arial`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "top";
       ctx.fillStyle = COLORS.textShadow;
       ctx.fillText("點擊畫面重新開始", width / 2 + 2, height * 0.18 + 2);
       ctx.fillStyle = COLORS.text;
       ctx.fillText("點擊畫面重新開始", width / 2, height * 0.18);
     } else {
       const remain = Math.ceil(EASTER.drillLockSeconds - elapsed);
-      ctx.font = `bold ${Math.max(18, Math.floor(height * 0.03))}px Arial`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "top";
       ctx.fillStyle = COLORS.textShadow;
       ctx.fillText(`請先看牠挖 ${remain}`, width / 2 + 2, height * 0.18 + 2);
       ctx.fillStyle = COLORS.text;
@@ -1440,6 +1459,14 @@
   }
 
   function draw() {
+    ctx.save();
+
+    if (cameraShakeTime > 0) {
+      const sx = rand(-cameraShakeStrength, cameraShakeStrength);
+      const sy = rand(-cameraShakeStrength, cameraShakeStrength);
+      ctx.translate(sx, sy);
+    }
+
     drawSky();
     drawClouds();
     drawPipes();
@@ -1455,18 +1482,8 @@
       drawHUDOverlays();
     }
 
+    ctx.restore();
     drawSoundButton();
-  }
-
-  function frame(timestamp) {
-    if (!lastTime) lastTime = timestamp;
-    const dt = Math.min((timestamp - lastTime) / 1000, 0.0333);
-    lastTime = timestamp;
-
-    update(dt);
-    draw();
-
-    requestAnimationFrame(frame);
   }
 
   function handleTap(clientX, clientY) {
@@ -1484,12 +1501,26 @@
     triggerAction();
   }
 
+  function frame(timestamp) {
+    if (!lastTime) lastTime = timestamp;
+    const dt = Math.min((timestamp - lastTime) / 1000, 0.0333);
+    lastTime = timestamp;
+
+    update(dt);
+    draw();
+
+    requestAnimationFrame(frame);
+  }
+
   function bindEvents() {
     window.addEventListener("resize", resize);
 
     window.addEventListener("keydown", (event) => {
       if (event.code === "Space") {
         event.preventDefault();
+        if (state === "playing") {
+          markUserInput();
+        }
         triggerAction();
       }
     });
@@ -1515,6 +1546,9 @@
         Math.abs(dy) <= EASTER.tapMaxDistance &&
         dt <= EASTER.tapMaxDurationMs
       ) {
+        if (state === "playing") {
+          markUserInput();
+        }
         handleTap(event.clientX, event.clientY);
       } else {
         registerSwipe(dx, dy);
@@ -1558,6 +1592,9 @@
             Math.abs(dy) <= EASTER.tapMaxDistance &&
             dt <= EASTER.tapMaxDurationMs
           ) {
+            if (state === "playing") {
+              markUserInput();
+            }
             handleTap(touch.clientX, touch.clientY);
           } else {
             registerSwipe(dx, dy);
@@ -1577,170 +1614,203 @@
       },
       { passive: false }
     );
-
-    window.addEventListener("keydown", ensureAudio);
   }
 
-  function ensureAudio() {
-    if (!audioContext) {
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      if (!AudioCtx) return;
+  function startBackgroundMusicLoop() {
+    if (!audioContext || bgmTimer) return;
 
-      audioContext = new AudioCtx();
-      masterGain = audioContext.createGain();
-      masterGain.gain.value = soundEnabled ? 0.18 : 0.0001;
-      masterGain.connect(audioContext.destination);
-    }
+    const playChunk = () => {
+      if (!audioContext || state === "easter_end" || state === "drill_end") return;
 
-    if (audioContext.state === "suspended") {
-      audioContext.resume();
-    }
+      const now = audioContext.currentTime;
+      playMusicNote(now + 0.00, 523.25, 0.32, 0.030);
+      playMusicNote(now + 0.36, 659.25, 0.28, 0.028);
+      playMusicNote(now + 0.72, 783.99, 0.30, 0.028);
+      playMusicNote(now + 1.10, 659.25, 0.28, 0.026);
 
-    if (!bgmStarted && !easterBgmActive && !drillBgmActive) {
-      startBackgroundMusic();
-      bgmStarted = true;
-    }
+      playPadNote(now + 0.00, 196.00, 1.40, 0.016);
+      playPadNote(now + 1.40, 220.00, 1.40, 0.016);
+    };
 
-    updateMasterGain();
+    playChunk();
+    bgmTimer = setInterval(playChunk, 2800);
   }
 
-  function updateMasterGain() {
-    if (!masterGain || !audioContext) return;
-    const now = audioContext.currentTime;
-    masterGain.gain.cancelScheduledValues(now);
-    masterGain.gain.setValueAtTime(soundEnabled ? 0.18 : 0.0001, now);
-  }
-
-  function stopSpecialMusic() {
-    if (musicSchedulerLookAhead) {
-      clearInterval(musicSchedulerLookAhead);
-      musicSchedulerLookAhead = null;
+  function stopAllAudioLoops() {
+    if (bgmTimer) {
+      clearInterval(bgmTimer);
+      bgmTimer = null;
     }
 
-    easterBgmActive = false;
-    drillBgmActive = false;
-
-    easterBgmNodes.forEach((node) => {
+    specialAudioNodes.forEach((node) => {
       try {
-        if (node.stop) node.stop();
+        node.stop();
       } catch (_) {}
     });
-    easterBgmNodes = [];
+    specialAudioNodes = [];
   }
 
   function startEasterEndingMusic() {
     if (!audioContext) return;
-    stopSpecialMusic();
-    easterBgmActive = true;
+    stopAllAudioLoops();
 
-    let phraseStart = audioContext.currentTime + 0.05;
-    scheduleAwkwardLoop(phraseStart);
-    phraseStart += 2.0;
-    scheduleAwkwardLoop(phraseStart);
+    const playAwkward = () => {
+      if (!audioContext || state !== "easter_end") return;
+      const start = audioContext.currentTime;
 
-    musicSchedulerLookAhead = setInterval(() => {
-      if (!audioContext || !easterBgmActive) return;
-      scheduleAwkwardLoop(audioContext.currentTime + 0.8);
-    }, 1600);
+      const notes = [
+        { f: 261.63, d: 0.22 },
+        { f: 277.18, d: 0.18 },
+        { f: 261.63, d: 0.16 },
+        { f: 220.00, d: 0.42 },
+        { f: 0.00, d: 0.08 },
+        { f: 220.00, d: 0.16 },
+        { f: 233.08, d: 0.16 },
+        { f: 220.00, d: 0.50 }
+      ];
+
+      let t = start;
+      for (const note of notes) {
+        if (note.f > 0) {
+          const osc1 = audioContext.createOscillator();
+          const osc2 = audioContext.createOscillator();
+          const gain = audioContext.createGain();
+          const filter = audioContext.createBiquadFilter();
+
+          osc1.type = "triangle";
+          osc2.type = "square";
+          osc1.frequency.setValueAtTime(note.f, t);
+          osc2.frequency.setValueAtTime(note.f * 1.007, t);
+
+          filter.type = "lowpass";
+          filter.frequency.setValueAtTime(1200, t);
+
+          gain.gain.setValueAtTime(0.0001, t);
+          gain.gain.linearRampToValueAtTime(0.03, t + 0.01);
+          gain.gain.linearRampToValueAtTime(0.02, t + note.d * 0.45);
+          gain.gain.linearRampToValueAtTime(0.0001, t + note.d);
+
+          osc1.connect(filter);
+          osc2.connect(filter);
+          filter.connect(gain);
+          gain.connect(masterGain);
+
+          osc1.start(t);
+          osc2.start(t);
+          osc1.stop(t + note.d + 0.02);
+          osc2.stop(t + note.d + 0.02);
+
+          specialAudioNodes.push(osc1, osc2);
+        }
+        t += note.d;
+      }
+    };
+
+    playAwkward();
+    bgmTimer = setInterval(playAwkward, 1600);
   }
 
   function startDrillMusic() {
     if (!audioContext) return;
-    stopSpecialMusic();
-    drillBgmActive = true;
+    stopAllAudioLoops();
 
-    musicSchedulerLookAhead = setInterval(() => {
-      if (!audioContext || !drillBgmActive) return;
-      playDrillHum(audioContext.currentTime);
-    }, 160);
+    const playDrill = () => {
+      if (!audioContext || state !== "drill_end") return;
+      const start = audioContext.currentTime;
 
-    playDrillHum(audioContext.currentTime);
+      const oscA = audioContext.createOscillator();
+      const oscB = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      const filter = audioContext.createBiquadFilter();
+
+      oscA.type = "sawtooth";
+      oscB.type = "triangle";
+      oscA.frequency.setValueAtTime(110 + Math.sin(start * 15) * 12, start);
+      oscB.frequency.setValueAtTime(220 + Math.cos(start * 13) * 18, start);
+
+      filter.type = "lowpass";
+      filter.frequency.setValueAtTime(950, start);
+
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.linearRampToValueAtTime(0.028, start + 0.01);
+      gain.gain.linearRampToValueAtTime(0.0001, start + 0.14);
+
+      oscA.connect(filter);
+      oscB.connect(filter);
+      filter.connect(gain);
+      gain.connect(masterGain);
+
+      oscA.start(start);
+      oscB.start(start);
+      oscA.stop(start + 0.15);
+      oscB.stop(start + 0.15);
+
+      specialAudioNodes.push(oscA, oscB);
+    };
+
+    playDrill();
+    bgmTimer = setInterval(playDrill, 160);
   }
 
-  function playDrillHum(start) {
-    if (!audioContext || !masterGain || !soundEnabled) return;
+  function playMusicNote(time, freq, duration, volume) {
+    if (!audioContext || !masterGain) return;
+
+    const osc = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+    const filter = audioContext.createBiquadFilter();
+
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(freq, time);
+
+    filter.type = "lowpass";
+    filter.frequency.setValueAtTime(1600, time);
+    filter.Q.value = 0.4;
+
+    gain.gain.setValueAtTime(0.0001, time);
+    gain.gain.linearRampToValueAtTime(volume, time + 0.04);
+    gain.gain.linearRampToValueAtTime(volume * 0.72, time + duration * 0.45);
+    gain.gain.linearRampToValueAtTime(0.0001, time + duration);
+
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(masterGain);
+
+    osc.start(time);
+    osc.stop(time + duration + 0.02);
+  }
+
+  function playPadNote(time, freq, duration, volume) {
+    if (!audioContext || !masterGain) return;
 
     const oscA = audioContext.createOscillator();
     const oscB = audioContext.createOscillator();
     const gain = audioContext.createGain();
     const filter = audioContext.createBiquadFilter();
 
-    oscA.type = "sawtooth";
-    oscB.type = "triangle";
-    oscA.frequency.setValueAtTime(110 + Math.sin(start * 15) * 12, start);
-    oscB.frequency.setValueAtTime(220 + Math.cos(start * 13) * 18, start);
+    oscA.type = "triangle";
+    oscB.type = "sine";
+
+    oscA.frequency.setValueAtTime(freq, time);
+    oscB.frequency.setValueAtTime(freq * 1.002, time);
 
     filter.type = "lowpass";
-    filter.frequency.setValueAtTime(950, start);
+    filter.frequency.setValueAtTime(900, time);
+    filter.Q.value = 0.2;
 
-    gain.gain.setValueAtTime(0.0001, start);
-    gain.gain.linearRampToValueAtTime(0.028, start + 0.01);
-    gain.gain.linearRampToValueAtTime(0.0001, start + 0.14);
+    gain.gain.setValueAtTime(0.0001, time);
+    gain.gain.linearRampToValueAtTime(volume, time + 0.25);
+    gain.gain.linearRampToValueAtTime(volume * 0.8, time + duration * 0.7);
+    gain.gain.linearRampToValueAtTime(0.0001, time + duration);
 
     oscA.connect(filter);
     oscB.connect(filter);
     filter.connect(gain);
     gain.connect(masterGain);
 
-    oscA.start(start);
-    oscB.start(start);
-    oscA.stop(start + 0.15);
-    oscB.stop(start + 0.15);
-
-    easterBgmNodes.push(oscA, oscB);
-  }
-
-  function scheduleAwkwardLoop(start) {
-    if (!audioContext || !masterGain) return;
-
-    const notes = [
-      { f: 261.63, d: 0.22 },
-      { f: 277.18, d: 0.18 },
-      { f: 261.63, d: 0.16 },
-      { f: 220.0, d: 0.42 },
-      { f: 0, d: 0.08 },
-      { f: 220.0, d: 0.16 },
-      { f: 233.08, d: 0.16 },
-      { f: 220.0, d: 0.50 }
-    ];
-
-    let t = start;
-
-    for (const note of notes) {
-      if (note.f > 0) {
-        const osc = audioContext.createOscillator();
-        const osc2 = audioContext.createOscillator();
-        const gain = audioContext.createGain();
-        const filter = audioContext.createBiquadFilter();
-
-        osc.type = "triangle";
-        osc2.type = "square";
-
-        osc.frequency.setValueAtTime(note.f, t);
-        osc2.frequency.setValueAtTime(note.f * 1.007, t);
-
-        filter.type = "lowpass";
-        filter.frequency.setValueAtTime(1200, t);
-
-        gain.gain.setValueAtTime(0.0001, t);
-        gain.gain.linearRampToValueAtTime(0.03, t + 0.01);
-        gain.gain.linearRampToValueAtTime(0.02, t + note.d * 0.45);
-        gain.gain.linearRampToValueAtTime(0.0001, t + note.d);
-
-        osc.connect(filter);
-        osc2.connect(filter);
-        filter.connect(gain);
-        gain.connect(masterGain);
-
-        osc.start(t);
-        osc2.start(t);
-        osc.stop(t + note.d + 0.02);
-        osc2.stop(t + note.d + 0.02);
-
-        easterBgmNodes.push(osc, osc2);
-      }
-      t += note.d;
-    }
+    oscA.start(time);
+    oscB.start(time);
+    oscA.stop(time + duration + 0.05);
+    oscB.stop(time + duration + 0.05);
   }
 
   function playFlapSound() {
@@ -1933,114 +2003,6 @@
     osc2.start(now);
     osc1.stop(now + 0.17);
     osc2.stop(now + 0.17);
-  }
-
-  function playMusicNote(time, freq, duration, volume) {
-    if (!audioContext || !masterGain) return;
-
-    const osc = audioContext.createOscillator();
-    const gain = audioContext.createGain();
-    const filter = audioContext.createBiquadFilter();
-
-    osc.type = "sine";
-    osc.frequency.setValueAtTime(freq, time);
-
-    filter.type = "lowpass";
-    filter.frequency.setValueAtTime(1600, time);
-    filter.Q.value = 0.4;
-
-    gain.gain.setValueAtTime(0.0001, time);
-    gain.gain.linearRampToValueAtTime(volume, time + 0.04);
-    gain.gain.linearRampToValueAtTime(volume * 0.72, time + duration * 0.45);
-    gain.gain.linearRampToValueAtTime(0.0001, time + duration);
-
-    osc.connect(filter);
-    filter.connect(gain);
-    gain.connect(masterGain);
-
-    osc.start(time);
-    osc.stop(time + duration + 0.02);
-  }
-
-  function playPadNote(time, freq, duration, volume) {
-    if (!audioContext || !masterGain) return;
-
-    const oscA = audioContext.createOscillator();
-    const oscB = audioContext.createOscillator();
-    const gain = audioContext.createGain();
-    const filter = audioContext.createBiquadFilter();
-
-    oscA.type = "triangle";
-    oscB.type = "sine";
-
-    oscA.frequency.setValueAtTime(freq, time);
-    oscB.frequency.setValueAtTime(freq * 1.002, time);
-
-    filter.type = "lowpass";
-    filter.frequency.setValueAtTime(900, time);
-    filter.Q.value = 0.2;
-
-    gain.gain.setValueAtTime(0.0001, time);
-    gain.gain.linearRampToValueAtTime(volume, time + 0.25);
-    gain.gain.linearRampToValueAtTime(volume * 0.8, time + duration * 0.7);
-    gain.gain.linearRampToValueAtTime(0.0001, time + duration);
-
-    oscA.connect(filter);
-    oscB.connect(filter);
-    filter.connect(gain);
-    gain.connect(masterGain);
-
-    oscA.start(time);
-    oscB.start(time);
-    oscA.stop(time + duration + 0.05);
-    oscB.stop(time + duration + 0.05);
-  }
-
-  function scheduleMusicChunk() {
-    if (!audioContext) return;
-
-    const bpm = 84;
-    const beat = 60 / bpm;
-    const bar = beat * 4;
-
-    const melody = [
-      523.25, 659.25, 783.99, 659.25,
-      493.88, 587.33, 659.25, 587.33
-    ];
-
-    const bass = [
-      196.0, 220.0, 174.61, 196.0
-    ];
-
-    const start = nextMusicTime;
-
-    for (let i = 0; i < melody.length; i++) {
-      const noteTime = start + i * beat * 0.5;
-      playMusicNote(noteTime, melody[i], beat * 0.42, 0.030);
-    }
-
-    for (let i = 0; i < bass.length; i++) {
-      const noteTime = start + i * beat;
-      playPadNote(noteTime, bass[i], beat * 1.6, 0.018);
-    }
-
-    nextMusicTime += bar;
-  }
-
-  function startBackgroundMusic() {
-    if (!audioContext) return;
-    if (easterBgmActive || drillBgmActive) return;
-
-    nextMusicTime = audioContext.currentTime + 0.08;
-    scheduleMusicChunk();
-    scheduleMusicChunk();
-
-    musicSchedulerLookAhead = setInterval(() => {
-      if (!audioContext || easterBgmActive || drillBgmActive) return;
-      while (nextMusicTime < audioContext.currentTime + 1.2) {
-        scheduleMusicChunk();
-      }
-    }, 300);
   }
 
   bindEvents();
